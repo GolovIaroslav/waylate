@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     pub model_id: String,
@@ -15,6 +16,7 @@ pub struct AppConfig {
     pub custom_model_path: String,
     pub ct2_model_path: String,
     pub ct2_tokenizer_path: String,
+    pub ct2_helper_command: String,
     pub ct2_device: String,
     pub api_provider_enabled: bool,
 }
@@ -32,6 +34,7 @@ impl Default for AppConfig {
             custom_model_path: String::new(),
             ct2_model_path: String::new(),
             ct2_tokenizer_path: String::new(),
+            ct2_helper_command: "waylate-ct2-translate".into(),
             ct2_device: "auto".into(),
             api_provider_enabled: false,
         }

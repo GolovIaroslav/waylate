@@ -97,8 +97,13 @@ fn translate_ctranslate2(config: &AppConfig, request: &TranslationRequest) -> Re
         return Err("NLLB/CTranslate2 profile needs a tokenizer path or Hugging Face tokenizer id in Settings.".into());
     }
 
-    let output = Command::new("python3")
-        .arg("scripts/waylate-ct2-translate.py")
+    let helper = if config.ct2_helper_command.trim().is_empty() {
+        "waylate-ct2-translate"
+    } else {
+        config.ct2_helper_command.trim()
+    };
+
+    let output = Command::new(helper)
         .arg("--model")
         .arg(&config.ct2_model_path)
         .arg("--tokenizer")
@@ -110,7 +115,6 @@ fn translate_ctranslate2(config: &AppConfig, request: &TranslationRequest) -> Re
         .arg("--target")
         .arg(&request.target_lang)
         .arg(&request.text)
-        .current_dir(std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf())).unwrap_or_default())
         .output()
         .map_err(|err| format!("Could not start CTranslate2 helper: {err}"))?;
 

@@ -53,6 +53,7 @@
     customModelPath: string;
     ct2ModelPath: string;
     ct2TokenizerPath: string;
+    ct2HelperCommand: string;
     ct2Device: string;
     apiProviderEnabled: boolean;
   };
@@ -386,6 +387,10 @@
           <label>
             Tokenizer path or HF id
             <input bind:value={config.ct2TokenizerPath} placeholder="facebook/nllb-200-distilled-600M" />
+          </label>
+          <label>
+            CTranslate2 helper command
+            <input bind:value={config.ct2HelperCommand} placeholder="waylate-ct2-translate" />
           </label>
           <label>
             Device

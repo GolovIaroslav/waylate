@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+import argparse
+import sys
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Translate text with a CTranslate2 NLLB model.")
+    parser.add_argument("text")
+    parser.add_argument("--model", required=True, help="Converted CTranslate2 model directory")
+    parser.add_argument("--tokenizer", required=True, help="Tokenizer directory or Hugging Face tokenizer id")
+    parser.add_argument("--source", required=True, help="Source language code, for example eng_Latn")
+    parser.add_argument("--target", required=True, help="Target language code, for example rus_Cyrl")
+    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    args = parser.parse_args()
+
+    try:
+        import ctranslate2
+        from transformers import AutoTokenizer
+    except Exception as exc:
+        print(
+            "Missing Python dependencies. Install ctranslate2, transformers and sentencepiece.",
+            file=sys.stderr,
+        )
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    device = args.device
+    if device == "auto":
+        device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+        if args.source != "auto" and hasattr(tokenizer, "src_lang"):
+            tokenizer.src_lang = args.source
+
+        translator = ctranslate2.Translator(args.model, device=device)
+        source_ids = tokenizer.encode(args.text)
+        source_tokens = tokenizer.convert_ids_to_tokens(source_ids)
+        target_prefix = [[args.target]]
+        result = translator.translate_batch(
+            [source_tokens],
+            target_prefix=target_prefix,
+            beam_size=4,
+            max_decoding_length=512,
+        )[0]
+
+        tokens = result.hypotheses[0]
+        if tokens and tokens[0] == args.target:
+            tokens = tokens[1:]
+        output = tokenizer.decode(tokenizer.convert_tokens_to_ids(tokens), skip_special_tokens=True)
+        print(output.strip())
+        return 0
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
