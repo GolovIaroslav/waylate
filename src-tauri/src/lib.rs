@@ -1,3 +1,4 @@
+mod autostart;
 mod clipboard;
 mod config;
 mod history;
@@ -92,6 +93,7 @@ fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
 #[tauri::command]
 fn save_config(state: State<'_, AppState>, next: AppConfig) -> Result<AppConfig, String> {
     config::save(&state.paths, &next)?;
+    autostart::sync(&state.paths, next.autostart)?;
     Ok(next)
 }
 
@@ -375,6 +377,9 @@ pub fn run() {
             let paths = AppPaths::new().map_err(|err| Box::<dyn std::error::Error>::from(err))?;
             paths.ensure().map_err(|err| Box::<dyn std::error::Error>::from(err))?;
             history::init(&paths.history_db).map_err(|err| Box::<dyn std::error::Error>::from(err))?;
+            if let Ok(config) = config::load(&paths) {
+                let _ = autostart::sync(&paths, config.autostart);
+            }
             app.manage(AppState {
                 paths,
                 pending: Mutex::new(None),
