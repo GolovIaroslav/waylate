@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Waylate
+GenericName=Wayland Translator
+Comment=Local-first popup translator for KDE Plasma Wayland
+Exec=waylate
+Icon=dev.jar.waylate
+Terminal=false
+Categories=Utility;Office;
+Keywords=translation;translate;wayland;kde;llm;nllb;
+StartupNotify=false
