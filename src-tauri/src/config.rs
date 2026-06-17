@@ -98,3 +98,26 @@ pub fn save(paths: &AppPaths, config: &AppConfig) -> Result<(), String> {
     fs::write(&paths.config_file, raw)
         .map_err(|err| format!("Could not write {}: {err}", paths.config_file.display()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_defaults_keep_history_and_api_off() {
+        let config = AppConfig::default();
+        assert_eq!(config.model_id, "hy-mt-gguf");
+        assert!(!config.history_enabled);
+        assert!(!config.api_provider_enabled);
+        assert_eq!(config.ct2_helper_command, "waylate-ct2-translate");
+    }
+
+    #[test]
+    fn missing_config_fields_fall_back_to_defaults() {
+        let raw = r#"{"modelId":"hy-mt-gguf","sourceLang":"auto","targetLang":"ru"}"#;
+        let config: AppConfig = serde_json::from_str(raw).expect("partial config should load");
+        assert_eq!(config.target_lang, "ru");
+        assert_eq!(config.openai_endpoint, AppConfig::default().openai_endpoint);
+        assert_eq!(config.ct2_helper_command, "waylate-ct2-translate");
+    }
+}

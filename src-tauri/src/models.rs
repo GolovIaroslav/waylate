@@ -148,3 +148,26 @@ fn lang((code, name): (&str, &str)) -> Language {
         name: name.into(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_contains_local_profiles_first() {
+        let catalog = catalog();
+        assert_eq!(catalog[0].id, "hy-mt-gguf");
+        assert!(catalog.iter().any(|profile| profile.id == "nllb-200-ct2"));
+        assert!(catalog.iter().any(|profile| profile.id == "custom-local"));
+    }
+
+    #[test]
+    fn nllb_profile_uses_nllb_language_codes() {
+        let profile = catalog()
+            .into_iter()
+            .find(|profile| profile.id == "nllb-200-ct2")
+            .expect("nllb profile exists");
+        assert!(profile.languages.iter().any(|language| language.code == "eng_Latn"));
+        assert!(profile.languages.iter().any(|language| language.code == "rus_Cyrl"));
+    }
+}
