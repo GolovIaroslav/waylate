@@ -7,6 +7,13 @@ API providers exist, but they stay disabled until you explicitly enable them.
 
 ## Install on Arch
 
+Download the prebuilt archive from GitHub Releases, unpack it, then run:
+
+```bash
+./install.sh
+waylate
+```
+
 From a checkout:
 
 ```bash

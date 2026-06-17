@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VERSION="${WAYLATE_VERSION:-$(node -p "require('$ROOT/package.json').version")}"
+TARGET="${WAYLATE_TARGET:-x86_64-arch-linux}"
+NAME="waylate-v${VERSION}-${TARGET}"
+STAGE="$ROOT/dist/$NAME"
+
+rm -rf "$STAGE"
+mkdir -p \
+  "$STAGE/bin" \
+  "$STAGE/share/applications" \
+  "$STAGE/share/icons/hicolor/128x128/apps" \
+  "$STAGE/share/licenses/waylate" \
+  "$STAGE/share/doc/waylate"
+
+install -Dm755 "$ROOT/src-tauri/target/release/waylate" "$STAGE/bin/waylate"
+install -Dm755 "$ROOT/scripts/waylate-ct2-translate" "$STAGE/bin/waylate-ct2-translate"
+install -Dm755 "$ROOT/install.sh" "$STAGE/install.sh"
+install -Dm644 "$ROOT/packaging/dev.jar.waylate.desktop" "$STAGE/share/applications/dev.jar.waylate.desktop"
+install -Dm644 "$ROOT/src-tauri/icons/128x128.png" "$STAGE/share/icons/hicolor/128x128/apps/dev.jar.waylate.png"
+install -Dm644 "$ROOT/LICENSE" "$STAGE/share/licenses/waylate/LICENSE"
+install -Dm644 "$ROOT/README.md" "$STAGE/share/doc/waylate/README.md"
+install -Dm644 "$ROOT/CHANGELOG.md" "$STAGE/share/doc/waylate/CHANGELOG.md"
+
+(
+  cd "$ROOT/dist"
+  tar -czf "$NAME.tar.gz" "$NAME"
+  sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
+)
+
+echo "$ROOT/dist/$NAME.tar.gz"
