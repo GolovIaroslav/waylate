@@ -31,7 +31,7 @@ sha256sums=()
 build() {
   cd "$srcdir/.."
   npm ci
-  npm run tauri build -- --bundles none
+  npm run tauri build -- --no-bundle
 }
 
 package() {
