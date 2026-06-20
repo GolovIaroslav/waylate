@@ -88,6 +88,7 @@
   type Snapshot = {
     config: AppConfig;
     catalog: ModelProfile[];
+    installedModelIds: string[];
     history: HistoryEntry[];
     environment: {
       desktop: string;
@@ -163,14 +164,19 @@
   let activeHelp: keyof typeof helpTexts | null = null;
   let helpCloseTimer: number | undefined;
   let uiLang: UiLang = "en";
+  let configSaveTimer: number | undefined;
+  let configSignature = "";
+  let configSaveBusy = false;
+  let configSaveQueued = false;
 
   $: selectedModel = snapshot?.catalog.find((model) => model.id === config?.modelId);
   $: languages = selectedModel?.languages ?? [];
   $: localModelReady = isCurrentModelReady();
-  $: downloadableModels = snapshot?.catalog.filter((model) => model.downloadable) ?? [];
-  $: selectableModels = snapshot?.catalog.filter((model) => model.provider !== "open-ai-compatible") ?? [];
+  $: curatedModels = localCatalogModels();
+  $: selectableModels = availableTranslateModels();
   $: uiLang = config?.uiLanguage === "ru" || config?.uiLanguage === "sk" ? config.uiLanguage : "en";
   $: if (config) applyTheme(config.theme);
+  $: if (config && snapshot) scheduleConfigSave();
 
   const languageAliases: Record<string, string[]> = {
     auto: ["auto"],
@@ -382,9 +388,10 @@
       copyTranslation: "Copy translation",
       localModel: "Local model",
       runtimeLoaded: "Loaded",
-      runtimeCold: "Cold start",
+      runtimeCold: "Not loaded yet",
       loadingModel: "Loading model...",
       ready: "Ready",
+      comingSoon: "Coming soon",
       setupNeeded: "Setup needed",
       onboardingTitle: "Local setup",
       onboardingText: "Download a local model once. After that, translation works offline.",
@@ -459,6 +466,7 @@
       diagnostics: "Diagnostics",
       activeRuntime: "Active runtime",
       none: "None",
+      noModelsInstalled: "No translation model is ready yet. Download one in Settings.",
       localModelReadyHint: "This model is ready to translate.",
       localModelMissingHint: "This model is not installed - Download it in Settings.",
     },
@@ -480,9 +488,10 @@
       copyTranslation: "Скопировать перевод",
       localModel: "Локальная модель",
       runtimeLoaded: "Загружена",
-      runtimeCold: "Холодный старт",
+      runtimeCold: "Еще не загружена",
       loadingModel: "Загрузка модели...",
       ready: "Готово",
+      comingSoon: "Скоро",
       setupNeeded: "Нужна настройка",
       onboardingTitle: "Локальная настройка",
       onboardingText: "Скачай локальную модель один раз. После этого перевод работает офлайн.",
@@ -557,6 +566,7 @@
       diagnostics: "Диагностика",
       activeRuntime: "Активный runtime",
       none: "Нет",
+      noModelsInstalled: "Пока нет готовых моделей для перевода. Скачай модель в настройках.",
       localModelReadyHint: "Эта модель готова к переводу.",
       localModelMissingHint: "Эта модель не установлена. Скачай её в настройках.",
     },
@@ -578,9 +588,10 @@
       copyTranslation: "Kopírovať preklad",
       localModel: "Lokálny model",
       runtimeLoaded: "Nahraté",
-      runtimeCold: "Studený štart",
+      runtimeCold: "Ešte nie je nahratý",
       loadingModel: "Načítava sa model...",
       ready: "Pripravené",
+      comingSoon: "Už čoskoro",
       setupNeeded: "Treba nastaviť",
       onboardingTitle: "Lokálne nastavenie",
       onboardingText: "Stiahni lokálny model raz. Potom preklad funguje offline.",
@@ -655,6 +666,7 @@
       diagnostics: "Diagnostika",
       activeRuntime: "Aktívny runtime",
       none: "Žiadny",
+      noModelsInstalled: "Zatiaľ nie je pripravený žiadny prekladový model. Stiahni model v nastaveniach.",
       localModelReadyHint: "Tento model je pripravený na preklad.",
       localModelMissingHint: "Tento model nie je nainštalovaný. Stiahni ho v nastaveniach.",
     },
@@ -693,9 +705,6 @@
     document.addEventListener("click", handleDocumentClick);
     void (async () => {
       await refresh();
-      if (!localModelReady) {
-        tab = "settings";
-      }
       await consumePending();
       unlisten = await listen("waylate-pending", consumePending);
       unlistenDownload = await listen<DownloadProgress>("model-download-progress", (event) => {
@@ -720,6 +729,11 @@
   async function refresh() {
     snapshot = await invoke<Snapshot>("get_snapshot");
     config = structuredClone(snapshot.config);
+    configSignature = configStateSignature(snapshot.config);
+    const available = availableTranslateModels(snapshot, config);
+    if (config && available.length && !available.some((model) => model.id === config?.modelId)) {
+      changeModel(available[0].id);
+    }
   }
 
   async function consumePending() {
@@ -747,9 +761,8 @@
       error = t("nothingToTranslate");
       return;
     }
-    if (selectedModel?.provider === "c-translate2" && !localModelReady) {
+    if (selectedModel && isLocalProfile(config.modelId) && !isModelInstalled(selectedModel.id)) {
       error = t("localModelMissingHint");
-      tab = "settings";
       return;
     }
     if (isLocalProfile(config.modelId)) {
@@ -831,15 +844,7 @@
   }
 
   async function saveSettings() {
-    if (!config) return;
-    error = "";
-    try {
-      config = await invoke<AppConfig>("save_config", { next: config });
-      await refresh();
-      status = t("settingsSaved");
-    } catch (err) {
-      error = String(err);
-    }
+    await persistConfig(true);
   }
 
   async function saveKey(provider: string, value: string) {
@@ -872,6 +877,7 @@
     if (!config) return;
     busy = true;
     error = "";
+    await persistConfig(false);
     downloadState = {
       modelId,
       status: "starting",
@@ -882,6 +888,14 @@
     try {
       const path = await invoke<string>("download_catalog_model", { modelId });
       await refresh();
+      downloadState = {
+        modelId,
+        status: "done",
+        message: t("downloaded"),
+        progress: 1,
+        downloadedBytes: downloadState?.downloadedBytes ?? 0,
+        totalBytes: downloadState?.totalBytes,
+      };
       status = `${t("downloaded")}: ${path}`;
     } catch (err) {
       error = String(err);
@@ -900,6 +914,7 @@
     status = "";
     busy = true;
     try {
+      await persistConfig(false);
       await invoke("translate_text", {
         request: {
           text: "Hello",
@@ -973,22 +988,115 @@
   function isLocalProfile(modelId: string) {
     const profile = snapshot?.catalog.find((item) => item.id === modelId);
     if (profile?.provider === "c-translate2") return true;
-    if (profile?.provider === "custom") return config?.customBackendMode === "managed-gguf";
+    if (profile?.provider === "custom") {
+      return profile.id !== "custom-local" || config?.customBackendMode === "managed-gguf";
+    }
     return false;
   }
 
   function isCurrentModelReady() {
-    if (!config || !selectedModel) return false;
+    return Boolean(selectedModel && isModelInstalled(selectedModel.id));
+  }
+
+  function isModelInstalled(modelId: string) {
+    return snapshot?.installedModelIds.includes(modelId) ?? false;
+  }
+
+  function hasInstalledModelFiles() {
+    if (!selectedModel) return false;
     if (selectedModel.provider === "c-translate2") {
-      return Boolean(config.ct2ModelPath && config.ct2TokenizerPath);
+      return Boolean(config?.ct2ModelPath && config?.ct2TokenizerPath);
+    }
+    if (selectedModel.provider === "custom" && selectedModel.id !== "custom-local") {
+      return isModelInstalled(selectedModel.id);
+    }
+    if (selectedModel.provider === "custom" && config?.customBackendMode === "managed-gguf") {
+      return Boolean(config.customModelPath);
+    }
+    return Boolean(config?.openaiEndpoint);
+  }
+
+  function hasTokenizerReady() {
+    if (!selectedModel) return false;
+    if (selectedModel.provider === "c-translate2") {
+      return Boolean(config?.ct2TokenizerPath);
     }
     if (selectedModel.provider === "custom") {
-      if (config.customBackendMode === "managed-gguf") {
-        return Boolean(config.customModelPath);
-      }
-      return Boolean(config.openaiEndpoint);
+      return hasInstalledModelFiles();
     }
     return false;
+  }
+
+  function needsPythonRuntime() {
+    return selectedModel?.provider === "c-translate2";
+  }
+
+  function localCatalogModels() {
+    return (
+      snapshot?.catalog.filter(
+        (model) =>
+          model.provider === "c-translate2" || (model.provider === "custom" && model.id !== "custom-local"),
+      ) ?? []
+    );
+  }
+
+  function availableTranslateModels(currentSnapshot = snapshot, currentConfig = config) {
+    if (!currentSnapshot) return [];
+    const installed = new Set(currentSnapshot.installedModelIds);
+    const models = currentSnapshot.catalog.filter((model) => installed.has(model.id));
+    if (models.length) return models;
+    if (!currentConfig) return [];
+    const current = currentSnapshot.catalog.find((model) => model.id === currentConfig.modelId);
+    return current && installed.has(current.id) ? [current] : [];
+  }
+
+  function configStateSignature(next: AppConfig) {
+    return JSON.stringify(next);
+  }
+
+  function scheduleConfigSave() {
+    if (typeof window === "undefined") return;
+    if (!config) return;
+    const nextSignature = configStateSignature(config);
+    if (nextSignature === configSignature) {
+      window.clearTimeout(configSaveTimer);
+      return;
+    }
+    window.clearTimeout(configSaveTimer);
+    configSaveTimer = window.setTimeout(() => {
+      void persistConfig(false);
+    }, 250);
+  }
+
+  async function persistConfig(showSavedStatus: boolean) {
+    if (!config) return;
+    const nextSignature = configStateSignature(config);
+    if (nextSignature === configSignature && !showSavedStatus) return;
+    if (configSaveBusy) {
+      configSaveQueued = true;
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+      await persistConfig(showSavedStatus);
+      return;
+    }
+    configSaveBusy = true;
+    error = "";
+    try {
+      const saved = await invoke<AppConfig>("save_config", { next: config });
+      config = saved;
+      configSignature = configStateSignature(saved);
+      await refresh();
+      if (showSavedStatus) {
+        status = t("settingsSaved");
+      }
+    } catch (err) {
+      error = String(err);
+    } finally {
+      configSaveBusy = false;
+      if (configSaveQueued) {
+        configSaveQueued = false;
+        await persistConfig(false);
+      }
+    }
   }
 
   function help(key: keyof typeof helpTexts) {
@@ -1062,11 +1170,17 @@
         <section class="toolbar" aria-label="Translation options">
           <label>
             {t("model")}
-            <select value={config.modelId} on:change={(event) => changeModel(event.currentTarget.value)}>
-              {#each selectableModels as model}
-                <option value={model.id}>{model.name}</option>
-              {/each}
-            </select>
+            {#if selectableModels.length}
+              <select value={config.modelId} on:change={(event) => changeModel(event.currentTarget.value)}>
+                {#each selectableModels as model}
+                  <option value={model.id}>{model.name}</option>
+                {/each}
+              </select>
+            {:else}
+              <select disabled>
+                <option>{t("noModelsInstalled")}</option>
+              </select>
+            {/if}
           </label>
           <label class="combo-label">
             {t("from")}
@@ -1115,7 +1229,7 @@
               {/if}
             </div>
           </label>
-          <button class="primary run" on:click={translate} disabled={busy}>
+          <button class="primary run" on:click={translate} disabled={busy || !selectableModels.length}>
             <span class:spin={busy}><RefreshCw size={15} /></span> {t("translate")}
           </button>
           <div class="zoom-controls" aria-label="Interface zoom">
@@ -1154,8 +1268,13 @@
         </section>
 
         <section class="model-note">
-          <strong>{selectedModel?.name}</strong>
-          <span>{selectedModel?.description}</span>
+          {#if selectableModels.length && selectedModel}
+            <strong>{selectedModel.name}</strong>
+            <span>{selectedModel.description}</span>
+          {:else}
+            <strong>{t("onboardingTitle")}</strong>
+            <span>{t("noModelsInstalled")}</span>
+          {/if}
         </section>
       {:else if tab === "settings"}
         <section class="settings-grid">
@@ -1170,9 +1289,9 @@
             </div>
             <p class="muted">{localModelReady ? t("localModelReadyHint") : t("onboardingText")}</p>
             <div class="setup-list">
-              <span class:ok={Boolean(config.ct2ModelPath) || Boolean(config.customModelPath)}>{t("modelPath")}</span>
-              <span class:ok={Boolean(config.ct2TokenizerPath) || config.customBackendMode === "managed-gguf"}>{t("tokenizer")}</span>
-              <span class:ok={snapshot.environment.hasPython}>{t("python")}</span>
+              <span class:ok={hasInstalledModelFiles()}>{t("modelPath")}</span>
+              <span class:ok={hasTokenizerReady()}>{t("tokenizer")}</span>
+              <span class:ok={!needsPythonRuntime() || snapshot.environment.hasPython}>{t("python")}</span>
               <span class:ok={Boolean(snapshot.runtime.selectedDevice) || config.ct2Device === "cpu"}>{t("device")}</span>
               <span class:ok={snapshot.runtime.selectedModelLoaded}>{snapshot.runtime.selectedModelLoaded ? t("runtimeLoaded") : t("runtimeCold")}</span>
             </div>
@@ -1193,7 +1312,7 @@
             </label>
             <h3>{t("modelManager")}</h3>
             <div class="model-manager">
-              {#each downloadableModels as model}
+              {#each curatedModels as model}
                 <article class:active={config.modelId === model.id} class="model-card">
                   <div class="model-card-head">
                     <strong>{model.name}</strong>
@@ -1214,6 +1333,14 @@
                       <progress max="1" value={downloadState.progress}></progress>
                       <button on:click={cancelDownload}>{t("cancel")}</button>
                     </div>
+                  {:else if isModelInstalled(model.id)}
+                    <button class="primary" disabled>
+                      <CheckCircle2 size={16} /> {t("downloaded")}
+                    </button>
+                  {:else if !model.downloadable}
+                    <button disabled>
+                      {t("comingSoon")}
+                    </button>
                   {:else}
                     <button class="primary" on:click={() => downloadModel(model.id)} disabled={busy}>
                       <Download size={16} /> {downloadState?.modelId === model.id && error ? t("retry") : t("download")}

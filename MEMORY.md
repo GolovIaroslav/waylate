@@ -14,3 +14,5 @@
 ## Settings UI → see src/routes/+page.svelte | UI language updates labels immediately, theme is saved in config, and `?` help opens on hover/click with a visible outline.
 ## Commit Cadence → see AGENTS.md | User wants small logical commits after each finished feature/fix phase, with push after verified batches rather than large infrequent commits.
 ## Runtime Direction → see implementation-notes.md | Current local path still shells into a Python/CT2 helper per translation; next architecture step is managed in-app runtimes with explicit warm/unload policies.
+## Installed Model State → see src-tauri/src/lib.rs and src/routes/+page.svelte | Translate view should trust backend-reported `installed_model_ids`, not raw config fields, so downloaded models stay marked ready and unavailable models stay hidden.
+## Catalog Scope → see src-tauri/src/models.rs | Settings should show five curated local model families; only entries with a working downloader/runtime get an active Download button, while unsupported families stay visible as coming soon.
