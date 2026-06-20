@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2
+
+- Add GitHub CI, Dependabot, issue templates, pull request template, contributing guide and security notes.
+- Make the Waylate `W` button return to the translate view.
+- Keep the closest compatible language when switching model profiles.
+
 ## 0.1.1
 
 - Ignore non-text Wayland clipboard contents instead of pasting image bytes.
