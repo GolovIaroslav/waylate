@@ -55,6 +55,7 @@ struct PendingRequest {
 struct AppSnapshot {
     config: AppConfig,
     catalog: Vec<ModelProfile>,
+    installed_model_ids: Vec<String>,
     history: Vec<history::HistoryEntry>,
     environment: EnvironmentReport,
     runtime: RuntimeReport,
@@ -108,6 +109,7 @@ struct HfFile {
 #[tauri::command]
 fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     let config = config::load(&state.paths)?;
+    let catalog = models::catalog();
     let entries = if config.history_enabled {
         history::list(&state.paths.history_db, 30)?
     } else {
@@ -115,7 +117,8 @@ fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     };
     Ok(AppSnapshot {
         config: config.clone(),
-        catalog: models::catalog(),
+        installed_model_ids: installed_model_ids(&state.paths, &config, &catalog),
+        catalog,
         history: entries,
         environment: environment_report(&state.paths, &config),
         runtime: state.runtime.report(&state.paths, &config),
@@ -225,6 +228,7 @@ fn cancel_model_download(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 async fn download_catalog_model(app: AppHandle, state: State<'_, AppState>, model_id: String) -> Result<String, String> {
+    let base_config = config::load(&state.paths)?;
     let profile = models::catalog()
         .into_iter()
         .find(|item| item.id == model_id)
@@ -247,7 +251,7 @@ async fn download_catalog_model(app: AppHandle, state: State<'_, AppState>, mode
     let app_for_download = app.clone();
     let runtime = state.runtime.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        download_huggingface_repo(&app_for_download, &paths, &runtime, &profile, &repo)
+        download_huggingface_repo(&app_for_download, &paths, &runtime, &profile, &repo, base_config)
     })
     .await
     .map_err(|err| err.to_string())?;
@@ -267,6 +271,7 @@ fn download_huggingface_repo(
     runtime: &Arc<RuntimeManager>,
     profile: &ModelProfile,
     repo: &str,
+    mut config: AppConfig,
 ) -> Result<String, String> {
     let target = paths.models_dir.join(&profile.id);
     std::fs::create_dir_all(&target).map_err(|err| err.to_string())?;
@@ -284,6 +289,17 @@ fn download_huggingface_repo(
     let files = huggingface_files(&client, repo)?;
     if files.is_empty() {
         return Err("Hugging Face repository has no downloadable files.".into());
+    }
+    let files = if profile.download_filenames.is_empty() {
+        files
+    } else {
+        files
+            .into_iter()
+            .filter(|file| profile.download_filenames.iter().any(|name| name == &file.path))
+            .collect::<Vec<_>>()
+    };
+    if files.is_empty() {
+        return Err("Built-in catalog entry is missing its curated download file.".into());
     }
     let total = files.iter().filter_map(|file| file.size).sum::<u64>();
     let total = if total > 0 { Some(total) } else { None };
@@ -364,7 +380,6 @@ fn download_huggingface_repo(
         }
     }
 
-    let mut config = config::load(paths)?;
     config.model_id = profile.id.clone();
     match profile.provider {
         ProviderKind::CTranslate2 => {
@@ -387,17 +402,32 @@ fn download_huggingface_repo(
                 config.ct2_device = "auto".into();
             }
         }
+        ProviderKind::Custom if profile.id != "custom-local" => {
+            config.custom_backend_mode = "managed-gguf".into();
+            config.openai_model = profile.name.clone();
+            if let Some(style) = &profile.managed_prompt_style {
+                config.local_prompt_style = style.clone();
+            }
+            if let Some(template) = &profile.managed_prompt_template {
+                config.local_prompt_template = template.clone();
+            }
+            if let Some(context) = profile.managed_context_size {
+                config.local_context_size = context;
+            }
+        }
         ProviderKind::OpenAiCompatible => {
             if let Some(endpoint) = &profile.default_endpoint {
                 config.openai_endpoint = endpoint.clone();
             }
             config.openai_model = profile.name.clone();
-            config.custom_model_path = target.display().to_string();
         }
         _ => {}
     }
     config::save(paths, &config)?;
-    if config.local_model_policy == "fast" && profile.provider == ProviderKind::CTranslate2 {
+    if config.local_model_policy == "fast"
+        && (profile.provider == ProviderKind::CTranslate2
+            || (profile.provider == ProviderKind::Custom && profile.id != "custom-local"))
+    {
         emit_download(
             app,
             &profile.id,
@@ -407,7 +437,11 @@ fn download_huggingface_repo(
             downloaded,
             total,
         );
-        let _ = runtime.ensure_ct2_server(paths, &config, &profile.id);
+        if profile.provider == ProviderKind::CTranslate2 {
+            let _ = runtime.ensure_ct2_server(paths, &config, &profile.id);
+        } else {
+            let _ = runtime.ensure_catalog_llama_server(paths, &config, profile, &profile.id);
+        }
     }
 
     emit_download(app, &profile.id, "done", "Ready", 1.0, downloaded, total);
@@ -666,6 +700,56 @@ fn has_command(name: &str) -> bool {
         .arg(format!("command -v {name} >/dev/null 2>&1"))
         .status()
         .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn installed_model_ids(paths: &AppPaths, config: &AppConfig, catalog: &[ModelProfile]) -> Vec<String> {
+    let mut installed = Vec::new();
+    for profile in catalog {
+        let ready = match profile.provider {
+            ProviderKind::CTranslate2 => model_dir_has_files(&paths.models_dir.join(&profile.id)),
+            ProviderKind::Custom if profile.id != "custom-local" => {
+                model_dir_has_extension(&paths.models_dir.join(&profile.id), "gguf")
+            }
+            ProviderKind::Custom => {
+                if config.custom_backend_mode == "managed-gguf" {
+                    std::path::Path::new(config.custom_model_path.trim()).is_file()
+                } else {
+                    !config.openai_endpoint.trim().is_empty()
+                }
+            }
+            ProviderKind::DeepL => config.api_provider_enabled && secrets::has("deepl"),
+            ProviderKind::Google => config.api_provider_enabled && secrets::has("google"),
+            ProviderKind::Yandex => config.api_provider_enabled && secrets::has("yandex"),
+            ProviderKind::OpenAiCompatible => false,
+        };
+        if ready {
+            installed.push(profile.id.clone());
+        }
+    }
+    installed
+}
+
+fn model_dir_has_files(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .ok()
+        .map(|mut entries| entries.any(|entry| entry.is_ok()))
+        .unwrap_or(false)
+}
+
+fn model_dir_has_extension(path: &Path, extension: &str) -> bool {
+    std::fs::read_dir(path)
+        .ok()
+        .map(|entries| {
+            entries.filter_map(Result::ok).any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .map(|value| value.eq_ignore_ascii_case(extension))
+                    .unwrap_or(false)
+            })
+        })
         .unwrap_or(false)
 }
 

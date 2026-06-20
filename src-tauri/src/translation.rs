@@ -42,7 +42,7 @@ pub fn translate(
 
     match profile.provider {
         ProviderKind::OpenAiCompatible => translate_openai_compatible(config, request),
-        ProviderKind::Custom => translate_custom_local(paths, runtime_manager, config, request),
+        ProviderKind::Custom => translate_custom_local(paths, runtime_manager, config, request, &profile),
         ProviderKind::CTranslate2 => translate_ctranslate2(paths, runtime_manager, config, request),
         ProviderKind::DeepL => translate_deepl(config, request),
         ProviderKind::Google => translate_google(config, request),
@@ -101,7 +101,17 @@ fn translate_custom_local(
     runtime_manager: &RuntimeManager,
     config: &AppConfig,
     request: &TranslationRequest,
+    profile: &crate::models::ModelProfile,
 ) -> Result<TranslationResponse, String> {
+    if profile.id != "custom-local" {
+        let (translated, device) = translate_catalog_managed_gguf(paths, runtime_manager, config, request, profile)?;
+        return Ok(TranslationResponse {
+            translated_text: translated,
+            provider_label: format!("Managed local GGUF ({device})"),
+            warning: None,
+        });
+    }
+
     if config.custom_backend_mode == "managed-gguf" {
         let (translated, device) = runtime::translate_via_managed_llama(
             runtime_manager,
@@ -120,6 +130,38 @@ fn translate_custom_local(
     }
 
     translate_openai_compatible(config, request)
+}
+
+fn translate_catalog_managed_gguf(
+    paths: &AppPaths,
+    runtime_manager: &RuntimeManager,
+    config: &AppConfig,
+    request: &TranslationRequest,
+    profile: &crate::models::ModelProfile,
+) -> Result<(String, String), String> {
+    let model_path = runtime::resolve_catalog_gguf_path(paths, profile)
+        .ok_or_else(|| "This model is not installed - Download it in Settings.".to_string())?;
+    let mut derived = config.clone();
+    derived.custom_backend_mode = "managed-gguf".into();
+    derived.custom_model_path = model_path;
+    if let Some(style) = &profile.managed_prompt_style {
+        derived.local_prompt_style = style.clone();
+    }
+    if let Some(template) = &profile.managed_prompt_template {
+        derived.local_prompt_template = template.clone();
+    }
+    if let Some(context) = profile.managed_context_size {
+        derived.local_context_size = context;
+    }
+    runtime::translate_via_managed_llama(
+        runtime_manager,
+        paths,
+        &derived,
+        &request.model_id,
+        &request.source_lang,
+        &request.target_lang,
+        &request.text,
+    )
 }
 
 fn translate_ctranslate2(

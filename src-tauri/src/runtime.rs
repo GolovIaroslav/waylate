@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, AppPaths};
+use crate::{config::{AppConfig, AppPaths}, models::ModelProfile};
 use reqwest::blocking::Client;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -150,6 +150,11 @@ impl RuntimeManager {
         }
         if config.model_id.starts_with("nllb-200") {
             let _ = self.ensure_ct2_server(paths, config, &config.model_id);
+        } else if let Some(profile) = crate::models::catalog()
+            .into_iter()
+            .find(|profile| profile.id == config.model_id && profile.id != "custom-local" && profile.provider == crate::models::ProviderKind::Custom)
+        {
+            let _ = self.ensure_catalog_llama_server(paths, config, &profile, &config.model_id);
         } else if config.model_id == "custom-local" && config.custom_backend_mode == "managed-gguf" {
             let _ = self.ensure_llama_server(paths, config, &config.model_id);
         }
@@ -216,19 +221,49 @@ impl RuntimeManager {
         config: &AppConfig,
         profile_id: &str,
     ) -> Result<ManagedEndpoint, String> {
-        if config.custom_model_path.trim().is_empty() {
-            return Err("Custom local model needs a GGUF model path in Advanced settings.".into());
+        self.ensure_llama_server_with_model(
+            paths,
+            config,
+            profile_id,
+            config.custom_model_path.trim(),
+            config.local_context_size,
+        )
+    }
+
+    pub fn ensure_catalog_llama_server(
+        &self,
+        paths: &AppPaths,
+        config: &AppConfig,
+        profile: &ModelProfile,
+        profile_id: &str,
+    ) -> Result<ManagedEndpoint, String> {
+        let model_path = resolve_catalog_gguf_path(paths, profile)
+            .ok_or_else(|| "This model is not installed - Download it in Settings.".to_string())?;
+        let context = profile.managed_context_size.unwrap_or(config.local_context_size);
+        self.ensure_llama_server_with_model(paths, config, profile_id, &model_path, context)
+    }
+
+    fn ensure_llama_server_with_model(
+        &self,
+        paths: &AppPaths,
+        config: &AppConfig,
+        profile_id: &str,
+        model_path: &str,
+        context_size: u32,
+    ) -> Result<ManagedEndpoint, String> {
+        if model_path.trim().is_empty() {
+            return Err("This model is not installed - Download it in Settings.".into());
         }
-        if !config.custom_model_path.trim().ends_with(".gguf") {
-            return Err("Managed custom local mode currently supports GGUF files only.".into());
+        if !model_path.trim().ends_with(".gguf") {
+            return Err("Managed local mode currently supports GGUF files only.".into());
         }
         let binary = resolve_llama_binary(config)
             .ok_or_else(|| "Managed GGUF mode needs a llama-server binary in Advanced settings.".to_string())?;
         let signature = format!(
             "{}|{}|{}|{}",
             binary,
-            config.custom_model_path.trim(),
-            config.local_context_size,
+            model_path.trim(),
+            context_size,
             config.ct2_device.trim()
         );
 
@@ -241,13 +276,13 @@ impl RuntimeManager {
         let mut command = Command::new(&binary);
         command
             .arg("--model")
-            .arg(config.custom_model_path.trim())
+            .arg(model_path.trim())
             .arg("--host")
             .arg("127.0.0.1")
             .arg("--port")
             .arg(port.to_string())
             .arg("-c")
-            .arg(config.local_context_size.to_string());
+            .arg(context_size.to_string());
         if config.ct2_device.trim() != "cpu" {
             command.arg("-ngl").arg("99");
         }
@@ -594,6 +629,27 @@ fn llama_reports_cuda(binary: &str) -> bool {
         }
     }
     false
+}
+
+pub fn resolve_catalog_gguf_path(paths: &AppPaths, profile: &ModelProfile) -> Option<String> {
+    let target_dir = paths.models_dir.join(&profile.id);
+    if let Some(filename) = profile.download_filenames.first() {
+        let path = target_dir.join(filename);
+        if path.is_file() {
+            return Some(path.display().to_string());
+        }
+    }
+    std::fs::read_dir(target_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.eq_ignore_ascii_case("gguf"))
+                .unwrap_or(false)
+        })
+        .map(|path| path.display().to_string())
 }
 
 pub fn prompt_template(config: &AppConfig, source: &str, target: &str, text: &str) -> String {
