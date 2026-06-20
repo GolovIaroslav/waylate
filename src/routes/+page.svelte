@@ -279,17 +279,17 @@
     },
     localModelPolicy: {
       en: "Balanced keeps the model warm for a while, Fast preloads it, Memory saver unloads it after each translation.",
-      ru: "Balanced держит модель тёплой некоторое время, Fast прогружает заранее, Memory saver выгружает после каждого перевода.",
+      ru: "Стандартно держит модель в памяти ещё некоторое время. Быстрый старт загружает её заранее. Экономия памяти выгружает модель после каждого перевода.",
       sk: "Balanced nechá model chvíľu nahratý, Fast ho prednačíta, Memory saver ho po každom preklade uvoľní.",
     },
     localModelIdleTimeout: {
       en: "How long the warm local runtime stays loaded after the last translation in Balanced mode.",
-      ru: "Сколько тёплый локальный runtime остаётся загруженным после последнего перевода в режиме Balanced.",
+      ru: "Как долго модель остаётся в памяти после последнего перевода в стандартном режиме.",
       sk: "Ako dlho zostane lokálny runtime po poslednom preklade nahratý v režime Balanced.",
     },
     customBackendMode: {
       en: "External OpenAI-compatible uses your own server. Managed GGUF starts a hidden llama-server process for a local GGUF file.",
-      ru: "External OpenAI-compatible использует твой готовый сервер. Managed GGUF сам запускает скрытый llama-server для локального GGUF файла.",
+      ru: "Внешний OpenAI-compatible использует Ваш готовый сервер. Managed GGUF сам запускает скрытый llama-server для локального GGUF-файла.",
       sk: "External OpenAI-compatible používa tvoj vlastný server. Managed GGUF spustí skrytý llama-server pre lokálny GGUF súbor.",
     },
     customModelPath: {
@@ -324,12 +324,12 @@
     },
     autostart: {
       en: "Starts Waylate in the background so the tray and shortcut workflow are ready after login.",
-      ru: "Запускает Waylate в фоне, чтобы tray и shortcut были готовы после входа в систему.",
+      ru: "Запускает Waylate в фоне, чтобы значок в трее и горячие клавиши были готовы после входа в систему.",
       sk: "Spustí Waylate na pozadí, aby bol tray a workflow so skratkou pripravený po prihlásení.",
     },
     networkApis: {
       en: "Allows cloud providers. Keep this off if you only want local translation.",
-      ru: "Разрешает облачные провайдеры. Оставь выключенным, если нужен только локальный перевод.",
+      ru: "Разрешает облачные провайдеры. Оставьте выключенным, если Вам нужен только локальный перевод.",
       sk: "Povolí cloudových providerov. Nechaj vypnuté, ak chceš iba lokálny preklad.",
     },
     deeplKey: {
@@ -349,7 +349,7 @@
     },
     yandexFolderId: {
       en: "ID of your Yandex Cloud folder.",
-      ru: "ID твоей папки в Yandex Cloud.",
+      ru: "ID Вашей папки в Yandex Cloud.",
       sk: "ID tvojho priečinka v Yandex Cloud.",
     },
     localBearer: {
@@ -359,12 +359,12 @@
     },
     uiLanguage: {
       en: "Changes the visible interface language immediately. Save settings to keep it after restart.",
-      ru: "Меняет язык интерфейса сразу. Сохрани настройки, чтобы оставить язык после перезапуска.",
+      ru: "Меняет язык интерфейса сразу. Изменение сохраняется автоматически.",
       sk: "Okamžite zmení jazyk rozhrania. Ulož nastavenia, aby zostal aj po reštarte.",
     },
     theme: {
       en: "Switches the interface between light and dark mode. Save settings to keep it after restart.",
-      ru: "Переключает интерфейс между светлой и тёмной темой. Сохрани настройки, чтобы оставить выбор после перезапуска.",
+      ru: "Переключает интерфейс между светлой и тёмной темой. Изменение сохраняется автоматически.",
       sk: "Prepína rozhranie medzi svetlým a tmavým režimom. Ulož nastavenia, aby zostal aj po reštarte.",
     },
   } as const;
@@ -458,6 +458,7 @@
       keyRemoved: "API key removed.",
       backendOk: "Translation works.",
       downloaded: "Ready",
+      localRuntimeUnavailable: "The local translator did not respond. Waylate restarted it. Please try again.",
       quantization: "Version",
       size: "Size",
       languages: "Languages",
@@ -469,6 +470,14 @@
       noModelsInstalled: "No translation model is ready yet. Download one in Settings.",
       localModelReadyHint: "This model is ready to translate.",
       localModelMissingHint: "This model is not installed - Download it in Settings.",
+      modelInstalledCold: "The model is installed. It will load into memory on the first translation.",
+      modelInstalledWarm: "The model is installed and already loaded into memory.",
+      modelNeedsDownload: "The model is not installed yet. Download it below.",
+      builtInModels: "Built-in models",
+      diagnosticsTitle: "Technical diagnostics",
+      diagnosticsHint: "Only for checking the environment and acceleration. These details are not needed for normal use.",
+      runtimeProbe: "Check local translation",
+      modelDetails: "Details",
     },
     ru: {
       translate: "Перевести",
@@ -481,7 +490,7 @@
       searchLanguage: "Поиск языка",
       source: "Текст",
       translation: "Перевод",
-      sourcePlaceholder: "Вставь текст для перевода",
+      sourcePlaceholder: "Вставьте текст для перевода",
       translationPlaceholder: "Перевод",
       readSelection: "Взять выделенный текст",
       pasteClipboard: "Вставить из буфера",
@@ -494,7 +503,7 @@
       comingSoon: "Скоро",
       setupNeeded: "Нужна настройка",
       onboardingTitle: "Локальная настройка",
-      onboardingText: "Скачай локальную модель один раз. После этого перевод работает офлайн.",
+      onboardingText: "Скачайте локальную модель один раз. После этого перевод будет работать офлайн.",
       download: "Скачать",
       downloading: "Скачивается",
       cancel: "Отмена",
@@ -506,14 +515,14 @@
       python: "Python",
       device: "Устройство",
       modelMemory: "Память модели",
-      balanced: "Balanced",
-      fast: "Fast",
-      memorySaver: "Memory saver",
+      balanced: "Стандартно",
+      fast: "Быстрый старт",
+      memorySaver: "Экономия памяти",
       idleTimeout: "Тайм-аут",
       minutesShort: "мин",
       advancedLocalBackend: "Дополнительно",
-      customBackendMode: "Режим custom",
-      externalOpenAi: "External OpenAI-compatible",
+      customBackendMode: "Режим подключения",
+      externalOpenAi: "Внешний OpenAI-compatible",
       managedGguf: "Managed GGUF",
       openaiEndpoint: "Свой endpoint",
       modelName: "Имя модели",
@@ -526,7 +535,7 @@
       completionStyle: "Completion",
       ct2ModelPath: "Папка модели",
       tokenizerPath: "Папка tokenizer",
-      helperCommand: "Помощник перевода",
+      helperCommand: "Локальный helper",
       privacyApis: "Приватность и API",
       interfaceLanguage: "Язык интерфейса",
       theme: "Тема",
@@ -535,7 +544,7 @@
       saveHistory: "Сохранять историю переводов локально",
       autostart: "Запускать Waylate в фоне",
       networkApis: "Разрешить сетевые API-провайдеры",
-      apiKeysNote: "Для DeepL, Google и Yandex нужен твой ключ.",
+      apiKeysNote: "Для DeepL, Google и Yandex нужен Ваш ключ.",
       deeplKey: "DeepL API key",
       googleKey: "Google API key",
       yandexKey: "Yandex API key",
@@ -548,7 +557,7 @@
       models: "Модели",
       localHistory: "Локальная история",
       clear: "Очистить",
-      historyDisabled: "История выключена. Включи её в настройках, если нужна локальная SQLite-история.",
+      historyDisabled: "История выключена. Включите её в настройках, если нужна локальная SQLite-история.",
       noHistory: "Сохранённых переводов пока нет.",
       loading: "Загрузка Waylate...",
       nothingToTranslate: "Нечего переводить.",
@@ -558,6 +567,7 @@
       keyRemoved: "API-ключ удалён.",
       backendOk: "Перевод работает.",
       downloaded: "Готово",
+      localRuntimeUnavailable: "Локальный переводчик не ответил. Waylate перезапустил его. Пожалуйста, попробуйте ещё раз.",
       quantization: "Версия",
       size: "Размер",
       languages: "Языки",
@@ -566,9 +576,17 @@
       diagnostics: "Диагностика",
       activeRuntime: "Активный runtime",
       none: "Нет",
-      noModelsInstalled: "Пока нет готовых моделей для перевода. Скачай модель в настройках.",
+      noModelsInstalled: "Пока нет готовых моделей для перевода. Скачайте модель в настройках.",
       localModelReadyHint: "Эта модель готова к переводу.",
-      localModelMissingHint: "Эта модель не установлена. Скачай её в настройках.",
+      localModelMissingHint: "Эта модель не установлена. Скачайте её в настройках.",
+      modelInstalledCold: "Модель установлена. Она загрузится в память при первом переводе.",
+      modelInstalledWarm: "Модель установлена и уже загружена в память.",
+      modelNeedsDownload: "Модель ещё не установлена. Скачайте её ниже.",
+      builtInModels: "Встроенные модели",
+      diagnosticsTitle: "Техническая диагностика",
+      diagnosticsHint: "Только для проверки окружения и ускорения. Обычному использованию эти детали не нужны.",
+      runtimeProbe: "Проверка локального перевода",
+      modelDetails: "Подробности",
     },
     sk: {
       translate: "Preložiť",
@@ -658,6 +676,7 @@
       keyRemoved: "API kľúč odstránený.",
       backendOk: "Preklad funguje.",
       downloaded: "Pripravené",
+      localRuntimeUnavailable: "Lokálny prekladač neodpovedal. Waylate ho reštartoval. Skúste to prosím ešte raz.",
       quantization: "Verzia",
       size: "Veľkosť",
       languages: "Jazyky",
@@ -669,6 +688,14 @@
       noModelsInstalled: "Zatiaľ nie je pripravený žiadny prekladový model. Stiahni model v nastaveniach.",
       localModelReadyHint: "Tento model je pripravený na preklad.",
       localModelMissingHint: "Tento model nie je nainštalovaný. Stiahni ho v nastaveniach.",
+      modelInstalledCold: "Model je nainštalovaný. Do pamäte sa načíta pri prvom preklade.",
+      modelInstalledWarm: "Model je nainštalovaný a už je načítaný v pamäti.",
+      modelNeedsDownload: "Model ešte nie je nainštalovaný. Stiahnite ho nižšie.",
+      builtInModels: "Vstavané modely",
+      diagnosticsTitle: "Technická diagnostika",
+      diagnosticsHint: "Len na kontrolu prostredia a akcelerácie. Pri bežnom používaní tieto detaily netreba.",
+      runtimeProbe: "Skontrolovať lokálny preklad",
+      modelDetails: "Podrobnosti",
     },
   } as const;
 
@@ -785,7 +812,7 @@
       status = response.warning ?? `Translated with ${response.providerLabel}.`;
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = friendlyErrorMessage(err);
     } finally {
       busy = false;
     }
@@ -843,10 +870,6 @@
     return nextLanguages.find((language) => language.code !== "auto")?.code ?? current;
   }
 
-  async function saveSettings() {
-    await persistConfig(true);
-  }
-
   async function saveKey(provider: string, value: string) {
     error = "";
     try {
@@ -898,7 +921,7 @@
       };
       status = `${t("downloaded")}: ${path}`;
     } catch (err) {
-      error = String(err);
+      error = friendlyErrorMessage(err);
     } finally {
       busy = false;
     }
@@ -931,7 +954,7 @@
       status = t("backendOk");
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = friendlyErrorMessage(err);
     } finally {
       busy = false;
     }
@@ -1029,6 +1052,14 @@
 
   function needsPythonRuntime() {
     return selectedModel?.provider === "c-translate2";
+  }
+
+  function modelReadinessSummary() {
+    if (!selectedModel) return t("modelNeedsDownload");
+    if (isModelInstalled(selectedModel.id)) {
+      return snapshot?.runtime.selectedModelLoaded ? t("modelInstalledWarm") : t("modelInstalledCold");
+    }
+    return t("modelNeedsDownload");
   }
 
   function localCatalogModels() {
@@ -1140,6 +1171,42 @@
       unit += 1;
     }
     return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+  }
+
+  function friendlyErrorMessage(err: unknown) {
+    const message = String(err);
+    if (
+      message.includes("Warm local runtime could not translate text")
+      || message.includes("Could not start warm local runtime")
+      || message.includes("Warm local runtime did not become ready in time")
+    ) {
+      return t("localRuntimeUnavailable");
+    }
+    return message;
+  }
+
+  function modelSummary(model: ModelProfile) {
+    if (uiLang !== "ru") return model.description;
+    const summaries: Record<string, string> = {
+      "nllb-200-ct2": "Рекомендуемая первая локальная модель. После одного скачивания работает офлайн и поддерживает много языков.",
+      "opus-mt-en-ru": "Лёгкое семейство моделей для отдельных языковых пар, например английский -> русский.",
+      "tencent-hy-mt2-gguf": "Компактная многоязычная GGUF-модель. Качество выше, чем у самых маленьких моделей, при умеренном размере.",
+      "translategemma-4b-gguf": "Более качественная GGUF-модель для широких переводческих задач, если у компьютера достаточно памяти.",
+      "milmmt-46-1b-gguf": "Небольшая GGUF-модель с хорошим балансом размера и качества, в том числе для словацкого языка.",
+    };
+    return summaries[model.id] ?? model.description;
+  }
+
+  function modelDetail(model: ModelProfile) {
+    if (uiLang !== "ru") return model.engineHint;
+    const details: Record<string, string> = {
+      "nllb-200-ct2": "Waylate сам скачивает модель, подготавливает локальный runtime и использует её прямо внутри приложения.",
+      "opus-mt-en-ru": "Это семейство будет добавлено следующим. Пока оно показано в каталоге, но скачивание ещё не включено.",
+      "tencent-hy-mt2-gguf": "Waylate скачивает подготовленный GGUF-файл и запускает его через управляемый локальный runtime.",
+      "translategemma-4b-gguf": "Waylate скачивает подготовленный GGUF-файл и запускает его через управляемый локальный runtime.",
+      "milmmt-46-1b-gguf": "Waylate скачивает подготовленный GGUF-файл и запускает его через управляемый локальный runtime.",
+    };
+    return details[model.id] ?? model.engineHint;
   }
 
 </script>
@@ -1288,29 +1355,8 @@
               {/if}
             </div>
             <p class="muted">{localModelReady ? t("localModelReadyHint") : t("onboardingText")}</p>
-            <div class="setup-list">
-              <span class:ok={hasInstalledModelFiles()}>{t("modelPath")}</span>
-              <span class:ok={hasTokenizerReady()}>{t("tokenizer")}</span>
-              <span class:ok={!needsPythonRuntime() || snapshot.environment.hasPython}>{t("python")}</span>
-              <span class:ok={Boolean(snapshot.runtime.selectedDevice) || config.ct2Device === "cpu"}>{t("device")}</span>
-              <span class:ok={snapshot.runtime.selectedModelLoaded}>{snapshot.runtime.selectedModelLoaded ? t("runtimeLoaded") : t("runtimeCold")}</span>
-            </div>
-            <label>
-              <span>{t("modelMemory")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "localModelPolicy")} on:mouseenter={() => showHelp("localModelPolicy")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "localModelPolicy"}<span class="help-popover">{help("localModelPolicy")}</span>{/if}</button></span>
-              <select bind:value={config.localModelPolicy}>
-                <option value="balanced">{t("balanced")}</option>
-                <option value="fast">{t("fast")}</option>
-                <option value="memory-saver">{t("memorySaver")}</option>
-              </select>
-            </label>
-            <label>
-              <span>{t("idleTimeout")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "localModelIdleTimeout")} on:mouseenter={() => showHelp("localModelIdleTimeout")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "localModelIdleTimeout"}<span class="help-popover">{help("localModelIdleTimeout")}</span>{/if}</button></span>
-              <div class="range-row">
-                <input type="range" min="60" max="3600" step="60" bind:value={config.localModelIdleTimeoutSecs} />
-                <span class="range-value">{Math.max(1, Math.round(config.localModelIdleTimeoutSecs / 60))} {t("minutesShort")}</span>
-              </div>
-            </label>
-            <h3>{t("modelManager")}</h3>
+            <p class="muted">{modelReadinessSummary()}</p>
+            <h3>{t("builtInModels")}</h3>
             <div class="model-manager">
               {#each curatedModels as model}
                 <article class:active={config.modelId === model.id} class="model-card">
@@ -1318,7 +1364,8 @@
                     <strong>{model.name}</strong>
                     <span>{model.size}</span>
                   </div>
-                  <p>{model.description}</p>
+                  <p>{modelSummary(model)}</p>
+                  <p class="detail">{modelDetail(model)}</p>
                   <dl>
                     <div><dt>{t("quantization")}</dt><dd>{model.quantization}</dd></div>
                     <div><dt>{t("size")}</dt><dd>{model.size}</dd></div>
@@ -1349,9 +1396,23 @@
                 </article>
               {/each}
             </div>
+            <label>
+              <span>{t("modelMemory")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "localModelPolicy")} on:mouseenter={() => showHelp("localModelPolicy")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "localModelPolicy"}<span class="help-popover">{help("localModelPolicy")}</span>{/if}</button></span>
+              <select bind:value={config.localModelPolicy}>
+                <option value="balanced">{t("balanced")}</option>
+                <option value="fast">{t("fast")}</option>
+                <option value="memory-saver">{t("memorySaver")}</option>
+              </select>
+            </label>
+            <label>
+              <span>{t("idleTimeout")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "localModelIdleTimeout")} on:mouseenter={() => showHelp("localModelIdleTimeout")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "localModelIdleTimeout"}<span class="help-popover">{help("localModelIdleTimeout")}</span>{/if}</button></span>
+              <div class="range-row">
+                <input type="range" min="60" max="3600" step="60" bind:value={config.localModelIdleTimeoutSecs} />
+                <span class="range-value">{Math.max(1, Math.round(config.localModelIdleTimeoutSecs / 60))} {t("minutesShort")}</span>
+              </div>
+            </label>
             <div class="actions">
-              <button on:click={testBackend} disabled={busy}><RefreshCw size={16} /> {t("testBackend")}</button>
-              <button on:click={saveSettings}><Save size={16} /> {t("saveSettings")}</button>
+              <button on:click={testBackend} disabled={busy}><RefreshCw size={16} /> {t("runtimeProbe")}</button>
             </div>
             <details>
               <summary>{t("advancedLocalBackend")}</summary>
@@ -1484,8 +1545,9 @@
             </label>
           </div>
 
-          <div class="group wide">
-            <h2>{t("diagnostics")}</h2>
+          <details class="group wide diagnostics-panel">
+            <summary>{t("diagnosticsTitle")}</summary>
+            <p class="muted">{t("diagnosticsHint")}</p>
             <div class="facts">
               <span class:ok={snapshot.environment.hasWlClipboard}>wl-clipboard</span>
               <span class:ok={snapshot.environment.hasPython}>python3</span>
@@ -1497,18 +1559,11 @@
               <span class:ok={snapshot.runtime.llamaCudaReported}>llama CUDA</span>
               <span class:ok={snapshot.runtime.selectedModelLoaded}>{t("activeRuntime")}: {snapshot.runtime.selectedModelLoaded ? (snapshot.runtime.selectedDevice ?? t("runtimeLoaded")) : t("none")}</span>
             </div>
-            {#if snapshot.runtime.activeProfiles.length}
-              <div class="runtime-list">
-                {#each snapshot.runtime.activeProfiles as item}
-                  <span class="runtime-chip">{item.profileId} / {item.kind} / {item.device} / {item.idleSeconds}s</span>
-                {/each}
-              </div>
-            {/if}
             <div class="actions">
               <button on:click={revealConfigDir}><FolderOpen size={16} /> {t("config")}</button>
               <button on:click={revealModelsDir}><FolderOpen size={16} /> {t("models")}</button>
             </div>
-          </div>
+          </details>
         </section>
       {:else}
         <section class="history-list">
@@ -1781,6 +1836,12 @@
     vertical-align: middle;
   }
 
+  .help :global(svg) {
+    display: block;
+    width: 13px;
+    height: 13px;
+  }
+
   .help:hover,
   .help:focus-visible {
     color: var(--text);
@@ -2031,29 +2092,6 @@
     background: var(--ok-bg);
   }
 
-  .setup-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 5px;
-  }
-
-  .setup-list span {
-    min-height: 22px;
-    padding: 2px 7px;
-    border: 1px solid var(--warn-border);
-    border-radius: 6px;
-    color: var(--warn-text);
-    background: var(--warn-bg);
-    font-size: 11px;
-    font-weight: 700;
-  }
-
-  .setup-list span.ok {
-    color: var(--ok-text);
-    background: var(--ok-bg);
-    border-color: var(--ok-border);
-  }
-
   h3 {
     margin: 0;
     color: var(--text);
@@ -2103,6 +2141,11 @@
     color: var(--muted-text);
     font-size: 12px;
     line-height: 1.35;
+  }
+
+  .model-card .detail {
+    color: var(--text);
+    opacity: 0.88;
   }
 
   .model-card dl {
@@ -2156,10 +2199,15 @@
   }
 
   summary {
+    list-style: none;
     cursor: pointer;
     color: var(--text);
     font-size: 13px;
     font-weight: 800;
+  }
+
+  summary::-webkit-details-marker {
+    display: none;
   }
 
   details[open] {
@@ -2217,23 +2265,6 @@
     color: var(--ok-text);
     background: var(--ok-bg);
     border-color: var(--ok-border);
-  }
-
-  .runtime-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-
-  .runtime-chip {
-    min-height: 26px;
-    padding: 4px 8px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    color: var(--text);
-    background: var(--surface-soft);
-    font-size: 11px;
-    white-space: nowrap;
   }
 
   .history-list {

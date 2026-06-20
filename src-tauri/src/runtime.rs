@@ -670,8 +670,28 @@ pub fn translate_via_warm_ct2(
     text: &str,
 ) -> Result<(String, String), String> {
     let endpoint = manager.ensure_ct2_server(paths, config, profile_id)?;
-    let value: Value = Client::new()
-        .post(format!("{}/translate", endpoint.endpoint))
+    let (value, device) = match warm_ct2_request(&endpoint.endpoint, source, target, text) {
+        Ok(value) => (value, endpoint.device.clone()),
+        Err(_) => {
+            let _ = manager.shutdown_profile(profile_id);
+            let restarted = manager.ensure_ct2_server(paths, config, profile_id)?;
+            (
+                warm_ct2_request(&restarted.endpoint, source, target, text)?,
+                restarted.device,
+            )
+        }
+    };
+
+    let translated = value
+        .get("translatedText")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Warm local runtime response did not contain a translation".to_string())?;
+    Ok((translated.trim().into(), device))
+}
+
+fn warm_ct2_request(endpoint: &str, source: &str, target: &str, text: &str) -> Result<Value, String> {
+    Client::new()
+        .post(format!("{endpoint}/translate"))
         .json(&json!({
             "text": text,
             "source": source,
@@ -682,13 +702,7 @@ pub fn translate_via_warm_ct2(
         .error_for_status()
         .map_err(|err| format!("Warm local runtime returned an error: {err}"))?
         .json()
-        .map_err(|err| format!("Could not parse warm local runtime response: {err}"))?;
-
-    let translated = value
-        .get("translatedText")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Warm local runtime response did not contain a translation".to_string())?;
-    Ok((translated.trim().into(), endpoint.device))
+        .map_err(|err| format!("Could not parse warm local runtime response: {err}"))
 }
 
 pub fn translate_via_managed_llama(

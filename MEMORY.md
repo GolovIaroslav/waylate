@@ -16,3 +16,5 @@
 ## Runtime Direction → see implementation-notes.md | Current local path still shells into a Python/CT2 helper per translation; next architecture step is managed in-app runtimes with explicit warm/unload policies.
 ## Installed Model State → see src-tauri/src/lib.rs and src/routes/+page.svelte | Translate view should trust backend-reported `installed_model_ids`, not raw config fields, so downloaded models stay marked ready and unavailable models stay hidden.
 ## Catalog Scope → see src-tauri/src/models.rs | Settings should show five curated local model families; only entries with a working downloader/runtime get an active Download button, while unsupported families stay visible as coming soon.
+## Settings UX → see src/routes/+page.svelte | Settings apply automatically; there should be no explicit save button, model cards should stay near the top of Settings, and internal runtime identifiers belong only in collapsed diagnostics.
+## Warm Runtime Recovery → see src-tauri/src/runtime.rs | If the warm CT2 process stops responding on its localhost port, Waylate should drop it and restart once automatically before surfacing an error.
