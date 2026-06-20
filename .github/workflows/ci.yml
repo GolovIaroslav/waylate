@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install system dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel git nodejs npm rust webkit2gtk-4.1 gtk3 libayatana-appindicator wl-clipboard python
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Check frontend
+        run: npm run check
+
+      - name: Test Rust backend
+        working-directory: src-tauri
+        run: cargo test
+
+      - name: Build app
+        run: npm run tauri build -- --no-bundle

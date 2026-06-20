@@ -93,6 +93,8 @@ workflows. They are disabled by default. Enable network providers in Settings
 before selecting them. API keys are stored through the system Secret Service
 keyring; Waylate does not write them into `config.json`.
 
+Waylate does not ship shared API keys. Each user must add their own provider key.
+
 ## Local Files
 
 Waylate follows XDG directories:
@@ -120,3 +122,9 @@ Project shape:
 
 Good GitHub topics for the repository: `wayland`, `kde`, `arch-linux`,
 `tauri`, `svelte`, `translation`, `llm`, `nllb`, `ctranslate2`.
+
+## Community
+
+Issues and pull requests are open on GitHub. Use bug reports for broken Wayland,
+clipboard, tray, or model behavior; use feature requests for new model providers
+and UI improvements.

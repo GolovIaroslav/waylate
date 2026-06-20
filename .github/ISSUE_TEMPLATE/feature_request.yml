@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest an improvement
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: What workflow should this improve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: Proposed behavior
+      description: Describe the simplest version that would solve it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Links, examples, model names, screenshots, or tradeoffs.

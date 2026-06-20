@@ -1,0 +1,46 @@
+name: Bug report
+description: Report a Waylate bug
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run ...
+        2. Select ...
+        3. Press ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Waylate version
+      placeholder: "0.1.1"
+
+  - type: dropdown
+    id: session
+    attributes:
+      label: Session
+      options:
+        - KDE Plasma Wayland
+        - Hyprland
+        - Sway
+        - Other Wayland
+        - X11
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Add terminal output, screenshots, or a short screen recording if useful.

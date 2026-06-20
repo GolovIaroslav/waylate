@@ -114,6 +114,32 @@
   $: languages = selectedModel?.languages ?? [];
   $: canDownload = Boolean(selectedModel?.downloadable);
 
+  const languageAliases: Record<string, string[]> = {
+    auto: ["auto"],
+    en: ["en", "eng_Latn"],
+    eng_Latn: ["eng_Latn", "en"],
+    ru: ["ru", "rus_Cyrl"],
+    rus_Cyrl: ["rus_Cyrl", "ru"],
+    sk: ["sk", "slk_Latn"],
+    slk_Latn: ["slk_Latn", "sk"],
+    cs: ["cs", "ces_Latn"],
+    ces_Latn: ["ces_Latn", "cs"],
+    de: ["de", "deu_Latn"],
+    deu_Latn: ["deu_Latn", "de"],
+    uk: ["uk", "ukr_Cyrl"],
+    ukr_Cyrl: ["ukr_Cyrl", "uk"],
+    pl: ["pl", "pol_Latn"],
+    pol_Latn: ["pol_Latn", "pl"],
+    fr: ["fr", "fra_Latn"],
+    fra_Latn: ["fra_Latn", "fr"],
+    es: ["es", "spa_Latn"],
+    spa_Latn: ["spa_Latn", "es"],
+    zh: ["zh", "zho_Hans"],
+    zho_Hans: ["zho_Hans", "zh"],
+    ja: ["ja", "jpn_Jpan"],
+    jpn_Jpan: ["jpn_Jpan", "ja"],
+  };
+
   onMount(() => {
     let unlisten: (() => void) | undefined;
     void (async () => {
@@ -211,6 +237,24 @@
     translatedText = oldSource;
   }
 
+  function changeModel(modelId: string) {
+    if (!config || !snapshot) return;
+    const nextModel = snapshot.catalog.find((model) => model.id === modelId);
+    if (!nextModel) return;
+    config.modelId = modelId;
+    config.sourceLang = closestLanguage(config.sourceLang, nextModel.languages, true);
+    config.targetLang = closestLanguage(config.targetLang, nextModel.languages, false);
+  }
+
+  function closestLanguage(current: string, nextLanguages: Language[], allowAuto: boolean) {
+    const available = new Set(nextLanguages.map((language) => language.code));
+    const aliases = languageAliases[current] ?? [current];
+    const match = aliases.find((code) => available.has(code));
+    if (match) return match;
+    if (allowAuto && available.has("auto")) return "auto";
+    return nextLanguages.find((language) => language.code !== "auto")?.code ?? current;
+  }
+
   async function saveSettings() {
     if (!config) return;
     error = "";
@@ -286,7 +330,7 @@
 
 <main class="shell">
   <aside class="rail">
-    <div class="mark" title="Waylate">W</div>
+    <button class="mark" title="Translate" aria-label="Translate" on:click={() => (tab = "translate")}>W</button>
     <nav aria-label="Views">
       <button class:active={tab === "translate"} title="Translate" aria-label="Translate" on:click={() => (tab = "translate")}>
         <Languages size={14} />
@@ -306,7 +350,7 @@
         <section class="toolbar" aria-label="Translation options">
           <label>
             Model
-            <select bind:value={config.modelId}>
+            <select value={config.modelId} on:change={(event) => changeModel(event.currentTarget.value)}>
               {#each snapshot.catalog as model}
                 <option value={model.id}>{model.name}</option>
               {/each}
