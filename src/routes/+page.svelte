@@ -55,9 +55,16 @@
     targetLang: string;
     historyEnabled: boolean;
     autostart: boolean;
+    localModelPolicy: string;
+    localModelIdleTimeoutSecs: number;
     openaiEndpoint: string;
     openaiModel: string;
+    customBackendMode: string;
     customModelPath: string;
+    localLlamaServerPath: string;
+    localPromptStyle: string;
+    localPromptTemplate: string;
+    localContextSize: number;
     ct2ModelPath: string;
     ct2TokenizerPath: string;
     ct2HelperCommand: string;
@@ -86,10 +93,25 @@
       desktop: string;
       sessionType: string;
       hasWlClipboard: boolean;
-      hasHuggingfaceCli: boolean;
       hasPython: boolean;
       hasNvidiaSmi: boolean;
       hasRocmSmi: boolean;
+      hasLlamaServer: boolean;
+      ct2CudaDevices: number;
+      llamaCudaReported: boolean;
+    };
+    runtime: {
+      activeProfiles: {
+        profileId: string;
+        kind: string;
+        device: string;
+        idleSeconds: number;
+      }[];
+      selectedModelLoaded: boolean;
+      selectedDevice?: string;
+      ct2CudaDevices: number;
+      llamaBinaryFound: boolean;
+      llamaCudaReported: boolean;
     };
     hasDeeplKey: boolean;
     hasGoogleKey: boolean;
@@ -144,9 +166,9 @@
 
   $: selectedModel = snapshot?.catalog.find((model) => model.id === config?.modelId);
   $: languages = selectedModel?.languages ?? [];
-  $: localModelReady = Boolean(config?.ct2ModelPath && config?.ct2TokenizerPath);
+  $: localModelReady = isCurrentModelReady();
   $: downloadableModels = snapshot?.catalog.filter((model) => model.downloadable) ?? [];
-  $: selectableModels = snapshot?.catalog.filter((model) => model.provider !== "open-ai-compatible" && model.provider !== "custom") ?? [];
+  $: selectableModels = snapshot?.catalog.filter((model) => model.provider !== "open-ai-compatible") ?? [];
   $: uiLang = config?.uiLanguage === "ru" || config?.uiLanguage === "sk" ? config.uiLanguage : "en";
   $: if (config) applyTheme(config.theme);
 
@@ -249,6 +271,46 @@
       ru: "auto пробует CUDA, если CTranslate2 видит CUDA-устройство, иначе CPU. CUDA быстрее, но во время перевода занимает VRAM.",
       sk: "auto skúsi CUDA, keď CTranslate2 vidí CUDA zariadenie, inak CPU. CUDA je rýchlejšia, ale počas prekladu používa VRAM.",
     },
+    localModelPolicy: {
+      en: "Balanced keeps the model warm for a while, Fast preloads it, Memory saver unloads it after each translation.",
+      ru: "Balanced держит модель тёплой некоторое время, Fast прогружает заранее, Memory saver выгружает после каждого перевода.",
+      sk: "Balanced nechá model chvíľu nahratý, Fast ho prednačíta, Memory saver ho po každom preklade uvoľní.",
+    },
+    localModelIdleTimeout: {
+      en: "How long the warm local runtime stays loaded after the last translation in Balanced mode.",
+      ru: "Сколько тёплый локальный runtime остаётся загруженным после последнего перевода в режиме Balanced.",
+      sk: "Ako dlho zostane lokálny runtime po poslednom preklade nahratý v režime Balanced.",
+    },
+    customBackendMode: {
+      en: "External OpenAI-compatible uses your own server. Managed GGUF starts a hidden llama-server process for a local GGUF file.",
+      ru: "External OpenAI-compatible использует твой готовый сервер. Managed GGUF сам запускает скрытый llama-server для локального GGUF файла.",
+      sk: "External OpenAI-compatible používa tvoj vlastný server. Managed GGUF spustí skrytý llama-server pre lokálny GGUF súbor.",
+    },
+    customModelPath: {
+      en: "Path to a local GGUF file when Managed GGUF mode is selected.",
+      ru: "Путь к локальному GGUF файлу, если выбран режим Managed GGUF.",
+      sk: "Cesta k lokálnemu GGUF súboru pri režime Managed GGUF.",
+    },
+    localLlamaServerPath: {
+      en: "Optional path to a custom llama-server binary. Leave empty to use `llama-server` from PATH.",
+      ru: "Необязательный путь к своему `llama-server`. Если пусто, используется `llama-server` из PATH.",
+      sk: "Voliteľná cesta k vlastnému `llama-server`. Ak je prázdne, použije sa `llama-server` z PATH.",
+    },
+    localPromptStyle: {
+      en: "Chat fits instruct models. Completion fits raw text continuation models.",
+      ru: "Chat подходит instruct-моделям. Completion подходит моделям с продолжением текста.",
+      sk: "Chat sa hodí pre instruct modely. Completion pre modely s pokračovaním textu.",
+    },
+    localPromptTemplate: {
+      en: "Available placeholders: {source}, {target}, {text}.",
+      ru: "Доступные placeholders: {source}, {target}, {text}.",
+      sk: "Dostupné placeholders: {source}, {target}, {text}.",
+    },
+    localContextSize: {
+      en: "Context window passed to llama-server for managed GGUF mode.",
+      ru: "Размер контекста, который Waylate передаёт в llama-server для Managed GGUF.",
+      sk: "Veľkosť kontextu, ktorú Waylate odovzdá llama-serveru v režime Managed GGUF.",
+    },
     history: {
       en: "When enabled, translations are stored locally in SQLite. Nothing is uploaded because of history.",
       ru: "Если включено, переводы сохраняются локально в SQLite. Из-за истории ничего не отправляется в сеть.",
@@ -319,6 +381,9 @@
       pasteClipboard: "Paste from clipboard",
       copyTranslation: "Copy translation",
       localModel: "Local model",
+      runtimeLoaded: "Loaded",
+      runtimeCold: "Cold start",
+      loadingModel: "Loading model...",
       ready: "Ready",
       setupNeeded: "Setup needed",
       onboardingTitle: "Local setup",
@@ -333,9 +398,25 @@
       tokenizer: "Tokenizer",
       python: "Python",
       device: "Device",
+      modelMemory: "Model memory",
+      balanced: "Balanced",
+      fast: "Fast",
+      memorySaver: "Memory saver",
+      idleTimeout: "Idle timeout",
+      minutesShort: "min",
       advancedLocalBackend: "Advanced",
+      customBackendMode: "Custom mode",
+      externalOpenAi: "External OpenAI-compatible",
+      managedGguf: "Managed GGUF",
       openaiEndpoint: "Custom endpoint",
       modelName: "Model name",
+      customModelPath: "GGUF model path",
+      llamaServerPath: "llama-server path",
+      promptStyle: "Prompt style",
+      promptTemplate: "Prompt template",
+      contextSize: "Context size",
+      chatStyle: "Chat",
+      completionStyle: "Completion",
       ct2ModelPath: "Model folder",
       tokenizerPath: "Tokenizer folder",
       helperCommand: "Translator helper",
@@ -374,6 +455,12 @@
       size: "Size",
       languages: "Languages",
       modelManager: "Model manager",
+      runtime: "Runtime",
+      diagnostics: "Diagnostics",
+      activeRuntime: "Active runtime",
+      none: "None",
+      localModelReadyHint: "This model is ready to translate.",
+      localModelMissingHint: "This model is not installed - Download it in Settings.",
     },
     ru: {
       translate: "Перевести",
@@ -392,6 +479,9 @@
       pasteClipboard: "Вставить из буфера",
       copyTranslation: "Скопировать перевод",
       localModel: "Локальная модель",
+      runtimeLoaded: "Загружена",
+      runtimeCold: "Холодный старт",
+      loadingModel: "Загрузка модели...",
       ready: "Готово",
       setupNeeded: "Нужна настройка",
       onboardingTitle: "Локальная настройка",
@@ -406,9 +496,25 @@
       tokenizer: "Токенизатор",
       python: "Python",
       device: "Устройство",
+      modelMemory: "Память модели",
+      balanced: "Balanced",
+      fast: "Fast",
+      memorySaver: "Memory saver",
+      idleTimeout: "Тайм-аут",
+      minutesShort: "мин",
       advancedLocalBackend: "Дополнительно",
+      customBackendMode: "Режим custom",
+      externalOpenAi: "External OpenAI-compatible",
+      managedGguf: "Managed GGUF",
       openaiEndpoint: "Свой endpoint",
       modelName: "Имя модели",
+      customModelPath: "Путь к GGUF модели",
+      llamaServerPath: "Путь к llama-server",
+      promptStyle: "Стиль prompt",
+      promptTemplate: "Шаблон prompt",
+      contextSize: "Размер контекста",
+      chatStyle: "Chat",
+      completionStyle: "Completion",
       ct2ModelPath: "Папка модели",
       tokenizerPath: "Папка tokenizer",
       helperCommand: "Помощник перевода",
@@ -447,6 +553,12 @@
       size: "Размер",
       languages: "Языки",
       modelManager: "Менеджер моделей",
+      runtime: "Runtime",
+      diagnostics: "Диагностика",
+      activeRuntime: "Активный runtime",
+      none: "Нет",
+      localModelReadyHint: "Эта модель готова к переводу.",
+      localModelMissingHint: "Эта модель не установлена. Скачай её в настройках.",
     },
     sk: {
       translate: "Preložiť",
@@ -465,6 +577,9 @@
       pasteClipboard: "Vložiť zo schránky",
       copyTranslation: "Kopírovať preklad",
       localModel: "Lokálny model",
+      runtimeLoaded: "Nahraté",
+      runtimeCold: "Studený štart",
+      loadingModel: "Načítava sa model...",
       ready: "Pripravené",
       setupNeeded: "Treba nastaviť",
       onboardingTitle: "Lokálne nastavenie",
@@ -479,9 +594,25 @@
       tokenizer: "Tokenizer",
       python: "Python",
       device: "Zariadenie",
+      modelMemory: "Pamäť modelu",
+      balanced: "Balanced",
+      fast: "Fast",
+      memorySaver: "Memory saver",
+      idleTimeout: "Timeout",
+      minutesShort: "min",
       advancedLocalBackend: "Pokročilé",
+      customBackendMode: "Custom režim",
+      externalOpenAi: "External OpenAI-compatible",
+      managedGguf: "Managed GGUF",
       openaiEndpoint: "Vlastný endpoint",
       modelName: "Názov modelu",
+      customModelPath: "Cesta ku GGUF modelu",
+      llamaServerPath: "Cesta k llama-server",
+      promptStyle: "Štýl promptu",
+      promptTemplate: "Šablóna promptu",
+      contextSize: "Veľkosť kontextu",
+      chatStyle: "Chat",
+      completionStyle: "Completion",
       ct2ModelPath: "Priečinok modelu",
       tokenizerPath: "Priečinok tokenizeru",
       helperCommand: "Pomocník prekladu",
@@ -520,6 +651,12 @@
       size: "Veľkosť",
       languages: "Jazyky",
       modelManager: "Správca modelov",
+      runtime: "Runtime",
+      diagnostics: "Diagnostika",
+      activeRuntime: "Aktívny runtime",
+      none: "Žiadny",
+      localModelReadyHint: "Tento model je pripravený na preklad.",
+      localModelMissingHint: "Tento model nie je nainštalovaný. Stiahni ho v nastaveniach.",
     },
   } as const;
 
@@ -556,7 +693,7 @@
     document.addEventListener("click", handleDocumentClick);
     void (async () => {
       await refresh();
-      if (config && !config.ct2ModelPath) {
+      if (!localModelReady) {
         tab = "settings";
       }
       await consumePending();
@@ -609,6 +746,14 @@
     if (!sourceText.trim()) {
       error = t("nothingToTranslate");
       return;
+    }
+    if (selectedModel?.provider === "c-translate2" && !localModelReady) {
+      error = t("localModelMissingHint");
+      tab = "settings";
+      return;
+    }
+    if (isLocalProfile(config.modelId)) {
+      status = snapshot?.runtime.selectedModelLoaded ? t("runtimeLoaded") : t("loadingModel");
     }
     busy = true;
     try {
@@ -758,7 +903,12 @@
       await invoke("translate_text", {
         request: {
           text: "Hello",
-          sourceLang: config.sourceLang === "auto" ? "eng_Latn" : config.sourceLang,
+          sourceLang:
+            config.sourceLang === "auto"
+              ? selectedModel?.provider === "c-translate2"
+                ? "eng_Latn"
+                : "en"
+              : config.sourceLang,
           targetLang: config.targetLang,
           modelId: config.modelId,
         },
@@ -818,6 +968,27 @@
       .filter((language) => includeAuto || language.code !== "auto")
       .filter((language) => !normalized || languageSearchText(language).includes(normalized))
       .slice(0, 36);
+  }
+
+  function isLocalProfile(modelId: string) {
+    const profile = snapshot?.catalog.find((item) => item.id === modelId);
+    if (profile?.provider === "c-translate2") return true;
+    if (profile?.provider === "custom") return config?.customBackendMode === "managed-gguf";
+    return false;
+  }
+
+  function isCurrentModelReady() {
+    if (!config || !selectedModel) return false;
+    if (selectedModel.provider === "c-translate2") {
+      return Boolean(config.ct2ModelPath && config.ct2TokenizerPath);
+    }
+    if (selectedModel.provider === "custom") {
+      if (config.customBackendMode === "managed-gguf") {
+        return Boolean(config.customModelPath);
+      }
+      return Boolean(config.openaiEndpoint);
+    }
+    return false;
   }
 
   function help(key: keyof typeof helpTexts) {
@@ -997,13 +1168,29 @@
                 <span class="pill">{t("setupNeeded")}</span>
               {/if}
             </div>
-            <p class="muted">{t("onboardingText")}</p>
+            <p class="muted">{localModelReady ? t("localModelReadyHint") : t("onboardingText")}</p>
             <div class="setup-list">
-              <span class:ok={Boolean(config.ct2ModelPath)}>{t("modelPath")}</span>
-              <span class:ok={Boolean(config.ct2TokenizerPath)}>{t("tokenizer")}</span>
+              <span class:ok={Boolean(config.ct2ModelPath) || Boolean(config.customModelPath)}>{t("modelPath")}</span>
+              <span class:ok={Boolean(config.ct2TokenizerPath) || config.customBackendMode === "managed-gguf"}>{t("tokenizer")}</span>
               <span class:ok={snapshot.environment.hasPython}>{t("python")}</span>
-              <span class:ok={snapshot.environment.hasNvidiaSmi || snapshot.environment.hasRocmSmi || config.ct2Device === "cpu"}>{t("device")}</span>
+              <span class:ok={Boolean(snapshot.runtime.selectedDevice) || config.ct2Device === "cpu"}>{t("device")}</span>
+              <span class:ok={snapshot.runtime.selectedModelLoaded}>{snapshot.runtime.selectedModelLoaded ? t("runtimeLoaded") : t("runtimeCold")}</span>
             </div>
+            <label>
+              <span>{t("modelMemory")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "localModelPolicy")} on:mouseenter={() => showHelp("localModelPolicy")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "localModelPolicy"}<span class="help-popover">{help("localModelPolicy")}</span>{/if}</button></span>
+              <select bind:value={config.localModelPolicy}>
+                <option value="balanced">{t("balanced")}</option>
+                <option value="fast">{t("fast")}</option>
+                <option value="memory-saver">{t("memorySaver")}</option>
+              </select>
+            </label>
+            <label>
+              <span>{t("idleTimeout")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "localModelIdleTimeout")} on:mouseenter={() => showHelp("localModelIdleTimeout")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "localModelIdleTimeout"}<span class="help-popover">{help("localModelIdleTimeout")}</span>{/if}</button></span>
+              <div class="range-row">
+                <input type="range" min="60" max="3600" step="60" bind:value={config.localModelIdleTimeoutSecs} />
+                <span class="range-value">{Math.max(1, Math.round(config.localModelIdleTimeoutSecs / 60))} {t("minutesShort")}</span>
+              </div>
+            </label>
             <h3>{t("modelManager")}</h3>
             <div class="model-manager">
               {#each downloadableModels as model}
@@ -1042,12 +1229,42 @@
             <details>
               <summary>{t("advancedLocalBackend")}</summary>
               <label>
+                <span>{t("customBackendMode")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "customBackendMode")} on:mouseenter={() => showHelp("customBackendMode")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "customBackendMode"}<span class="help-popover">{help("customBackendMode")}</span>{/if}</button></span>
+                <select bind:value={config.customBackendMode}>
+                  <option value="external-openai">{t("externalOpenAi")}</option>
+                  <option value="managed-gguf">{t("managedGguf")}</option>
+                </select>
+              </label>
+              <label>
                 <span>{t("openaiEndpoint")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "openaiEndpoint")} on:mouseenter={() => showHelp("openaiEndpoint")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "openaiEndpoint"}<span class="help-popover">{help("openaiEndpoint")}</span>{/if}</button></span>
                 <input bind:value={config.openaiEndpoint} placeholder="http://127.0.0.1:8080/v1/chat/completions" />
               </label>
               <label>
                 <span>{t("modelName")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "openaiModel")} on:mouseenter={() => showHelp("openaiModel")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "openaiModel"}<span class="help-popover">{help("openaiModel")}</span>{/if}</button></span>
                 <input bind:value={config.openaiModel} placeholder="local-translation-model" />
+              </label>
+              <label>
+                <span>{t("customModelPath")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "customModelPath")} on:mouseenter={() => showHelp("customModelPath")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "customModelPath"}<span class="help-popover">{help("customModelPath")}</span>{/if}</button></span>
+                <input bind:value={config.customModelPath} placeholder="/home/user/models/custom.gguf" />
+              </label>
+              <label>
+                <span>{t("llamaServerPath")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "localLlamaServerPath")} on:mouseenter={() => showHelp("localLlamaServerPath")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "localLlamaServerPath"}<span class="help-popover">{help("localLlamaServerPath")}</span>{/if}</button></span>
+                <input bind:value={config.localLlamaServerPath} placeholder="llama-server" />
+              </label>
+              <label>
+                <span>{t("promptStyle")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "localPromptStyle")} on:mouseenter={() => showHelp("localPromptStyle")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "localPromptStyle"}<span class="help-popover">{help("localPromptStyle")}</span>{/if}</button></span>
+                <select bind:value={config.localPromptStyle}>
+                  <option value="chat">{t("chatStyle")}</option>
+                  <option value="completion">{t("completionStyle")}</option>
+                </select>
+              </label>
+              <label>
+                <span>{t("contextSize")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "localContextSize")} on:mouseenter={() => showHelp("localContextSize")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "localContextSize"}<span class="help-popover">{help("localContextSize")}</span>{/if}</button></span>
+                <input bind:value={config.localContextSize} type="number" min="512" step="256" />
+              </label>
+              <label>
+                <span>{t("promptTemplate")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "localPromptTemplate")} on:mouseenter={() => showHelp("localPromptTemplate")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "localPromptTemplate"}<span class="help-popover">{help("localPromptTemplate")}</span>{/if}</button></span>
+                <textarea class="prompt-template" bind:value={config.localPromptTemplate} rows="4"></textarea>
               </label>
               <label>
                 <span>{t("ct2ModelPath")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "ct2ModelPath")} on:mouseenter={() => showHelp("ct2ModelPath")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "ct2ModelPath"}<span class="help-popover">{help("ct2ModelPath")}</span>{/if}</button></span>
@@ -1141,14 +1358,25 @@
           </div>
 
           <div class="group wide">
-            <h2>{t("system")}</h2>
+            <h2>{t("diagnostics")}</h2>
             <div class="facts">
               <span class:ok={snapshot.environment.hasWlClipboard}>wl-clipboard</span>
               <span class:ok={snapshot.environment.hasPython}>python3</span>
               <span class="ok">HF HTTP</span>
               <span class:ok={snapshot.environment.hasNvidiaSmi}>CUDA/NVIDIA</span>
               <span class:ok={snapshot.environment.hasRocmSmi}>ROCm</span>
+              <span class:ok={snapshot.runtime.ct2CudaDevices > 0}>CT2 CUDA: {snapshot.runtime.ct2CudaDevices}</span>
+              <span class:ok={snapshot.runtime.llamaBinaryFound}>llama-server</span>
+              <span class:ok={snapshot.runtime.llamaCudaReported}>llama CUDA</span>
+              <span class:ok={snapshot.runtime.selectedModelLoaded}>{t("activeRuntime")}: {snapshot.runtime.selectedModelLoaded ? (snapshot.runtime.selectedDevice ?? t("runtimeLoaded")) : t("none")}</span>
             </div>
+            {#if snapshot.runtime.activeProfiles.length}
+              <div class="runtime-list">
+                {#each snapshot.runtime.activeProfiles as item}
+                  <span class="runtime-chip">{item.profileId} / {item.kind} / {item.device} / {item.idleSeconds}s</span>
+                {/each}
+              </div>
+            {/if}
             <div class="actions">
               <button on:click={revealConfigDir}><FolderOpen size={16} /> {t("config")}</button>
               <button on:click={revealModelsDir}><FolderOpen size={16} /> {t("models")}</button>
@@ -1526,6 +1754,11 @@
     line-height: 1.45;
   }
 
+  .prompt-template {
+    min-height: 92px;
+    height: auto;
+  }
+
   .icon {
     width: 30px;
     padding: 0;
@@ -1586,6 +1819,20 @@
     display: flex;
     gap: 6px;
     align-items: center;
+  }
+
+  .range-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .range-value {
+    min-width: 52px;
+    color: var(--text);
+    font-size: 12px;
+    text-align: right;
   }
 
   .pane-actions {
@@ -1843,6 +2090,23 @@
     color: var(--ok-text);
     background: var(--ok-bg);
     border-color: var(--ok-border);
+  }
+
+  .runtime-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .runtime-chip {
+    min-height: 26px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text);
+    background: var(--surface-soft);
+    font-size: 11px;
+    white-space: nowrap;
   }
 
   .history-list {
