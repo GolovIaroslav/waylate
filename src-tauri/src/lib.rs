@@ -40,6 +40,7 @@ struct AppSnapshot {
     environment: EnvironmentReport,
     has_deepl_key: bool,
     has_google_key: bool,
+    has_yandex_key: bool,
     has_local_key: bool,
     paths: PathReport,
 }
@@ -80,6 +81,7 @@ fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
         environment: environment_report(),
         has_deepl_key: secrets::has("deepl"),
         has_google_key: secrets::has("google"),
+        has_yandex_key: secrets::has("yandex"),
         has_local_key: secrets::has("openai-compatible"),
         paths: PathReport {
             config_dir: state.paths.config_dir.display().to_string(),
@@ -184,10 +186,23 @@ fn download_catalog_model(state: State<'_, AppState>, model_id: String) -> Resul
         .arg("--local-dir")
         .arg(&target)
         .output()
-        .map_err(|err| format!("Could not start huggingface-cli: {err}"))?;
+        .map_err(|err| format!("Could not start huggingface-cli: {err}. Install it with: pipx install \"huggingface_hub[cli]\""))?;
 
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    let mut config = config::load(&state.paths)?;
+    if profile.id == "nllb-200-ct2" {
+        config.model_id = profile.id.clone();
+        config.ct2_model_path = target.display().to_string();
+        config.ct2_tokenizer_path = target.display().to_string();
+        config.ct2_device = if environment_report().has_nvidia_smi {
+            "cuda".into()
+        } else {
+            "cpu".into()
+        };
+        config::save(&state.paths, &config)?;
     }
 
     Ok(target.display().to_string())

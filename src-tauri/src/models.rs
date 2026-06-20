@@ -29,6 +29,7 @@ pub enum ProviderKind {
     CTranslate2,
     DeepL,
     Google,
+    Yandex,
     Custom,
 }
 
@@ -51,12 +52,12 @@ pub fn catalog() -> Vec<ModelProfile> {
             id: "nllb-200-ct2".into(),
             name: "Meta NLLB-200 CTranslate2".into(),
             provider: ProviderKind::CTranslate2,
-            description: "Wide-language local translation profile for converted NLLB CTranslate2 models.".into(),
+            description: "One-click local profile for a converted NLLB CTranslate2 model.".into(),
             license: "CC-BY-NC 4.0 for Meta NLLB checkpoints; research/non-commercial constraints apply.".into(),
-            homepage: "https://huggingface.co/facebook/nllb-200-distilled-600M".into(),
-            engine_hint: "Install python dependencies ctranslate2 and transformers, then point Waylate to a converted CTranslate2 model directory.".into(),
+            homepage: "https://huggingface.co/entai2965/nllb-200-distilled-600M-ctranslate2".into(),
+            engine_hint: "Download from Settings. Waylate will save the model path automatically, then call waylate-ct2-translate with CTranslate2.".into(),
             default_endpoint: None,
-            hf_repo: Some("OpenNMT/nllb-200-distilled-1.3B-ct2-int8".into()),
+            hf_repo: Some("entai2965/nllb-200-distilled-600M-ctranslate2".into()),
             languages: nllb_languages(),
             downloadable: true,
         },
@@ -82,6 +83,19 @@ pub fn catalog() -> Vec<ModelProfile> {
             homepage: "https://cloud.google.com/translate/docs".into(),
             engine_hint: "Save a Google Cloud Translation API key in settings. Text is sent to Google only when this profile is selected.".into(),
             default_endpoint: Some("https://translation.googleapis.com/language/translate/v2".into()),
+            hf_repo: None,
+            languages: popular_languages(),
+            downloadable: false,
+        },
+        ModelProfile {
+            id: "yandex-api".into(),
+            name: "Yandex Cloud Translate".into(),
+            provider: ProviderKind::Yandex,
+            description: "Network translation provider. Disabled by default; needs your own API key and folder ID.".into(),
+            license: "Yandex Cloud terms".into(),
+            homepage: "https://aistudio.yandex.ru/docs/en/translate/operations/translate".into(),
+            engine_hint: "Save a Yandex Cloud API key and Folder ID in Settings. Text is sent to Yandex only when this profile is selected.".into(),
+            default_endpoint: Some("https://translate.api.cloud.yandex.net/translate/v2/translate".into()),
             hf_repo: None,
             languages: popular_languages(),
             downloadable: false,
@@ -114,8 +128,12 @@ fn popular_languages() -> Vec<Language> {
         ("pl", "Polish"),
         ("fr", "French"),
         ("es", "Spanish"),
+        ("it", "Italian"),
+        ("pt", "Portuguese"),
+        ("tr", "Turkish"),
         ("zh", "Chinese"),
         ("ja", "Japanese"),
+        ("ko", "Korean"),
     ]
     .into_iter()
     .map(lang)
@@ -134,8 +152,12 @@ fn nllb_languages() -> Vec<Language> {
         ("pol_Latn", "Polish"),
         ("fra_Latn", "French"),
         ("spa_Latn", "Spanish"),
+        ("ita_Latn", "Italian"),
+        ("por_Latn", "Portuguese"),
+        ("tur_Latn", "Turkish"),
         ("zho_Hans", "Chinese Simplified"),
         ("jpn_Jpan", "Japanese"),
+        ("kor_Hang", "Korean"),
     ]
     .into_iter()
     .map(lang)

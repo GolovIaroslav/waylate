@@ -73,8 +73,9 @@ Hugging Face repository can run everywhere.
 
 - `Tencent Hy-MT GGUF`: use a local OpenAI-compatible server, for example
   `llama.cpp` server on `http://127.0.0.1:8080/v1/chat/completions`.
-- `Meta NLLB-200 CTranslate2`: point Settings to a converted CTranslate2 model
-  directory and a tokenizer path or Hugging Face tokenizer id.
+- `Meta NLLB-200 CTranslate2`: use Settings > Local model > Download and
+  configure NLLB. Waylate downloads the catalog model from Hugging Face and
+  saves the CTranslate2 model/tokenizer paths automatically.
 - `Custom local model`: use your own endpoint or local setup.
 
 For CTranslate2/NLLB, Waylate calls:
@@ -88,12 +89,13 @@ language codes; API and GGUF profiles show a smaller practical list.
 
 ## API Providers
 
-DeepL and Google Cloud Translate profiles are included for testing and fallback
-workflows. They are disabled by default. Enable network providers in Settings
-before selecting them. API keys are stored through the system Secret Service
-keyring; Waylate does not write them into `config.json`.
+DeepL, Google Cloud Translate and Yandex Cloud Translate profiles are included
+for testing and fallback workflows. They are disabled by default. Enable network
+providers in Settings before selecting them. API keys are stored through the
+system Secret Service keyring; Waylate does not write them into `config.json`.
 
 Waylate does not ship shared API keys. Each user must add their own provider key.
+Yandex also needs a Cloud Folder ID.
 
 ## Local Files
 

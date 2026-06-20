@@ -3,8 +3,11 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import {
+    CheckCircle2,
+    ChevronDown,
     Clipboard,
     Copy,
+    CircleHelp,
     Download,
     FolderOpen,
     History,
@@ -14,6 +17,8 @@
     Save,
     Settings,
     Trash2,
+    ZoomIn,
+    ZoomOut,
   } from "@lucide/svelte";
 
   type ProviderKind =
@@ -21,6 +26,7 @@
     | "c-translate2"
     | "deep-l"
     | "google"
+    | "yandex"
     | "custom";
 
   type Language = {
@@ -56,6 +62,8 @@
     ct2HelperCommand: string;
     ct2Device: string;
     apiProviderEnabled: boolean;
+    yandexFolderId: string;
+    uiLanguage: string;
   };
 
   type HistoryEntry = {
@@ -83,6 +91,7 @@
     };
     hasDeeplKey: boolean;
     hasGoogleKey: boolean;
+    hasYandexKey: boolean;
     hasLocalKey: boolean;
     paths: {
       configDir: string;
@@ -108,11 +117,17 @@
   let busy = false;
   let deeplKey = "";
   let googleKey = "";
+  let yandexKey = "";
   let localKey = "";
+  let uiScale = 1;
+  let sourceLanguageQuery = "";
+  let targetLanguageQuery = "";
+  let sourceLanguageOpen = false;
+  let targetLanguageOpen = false;
 
   $: selectedModel = snapshot?.catalog.find((model) => model.id === config?.modelId);
   $: languages = selectedModel?.languages ?? [];
-  $: canDownload = Boolean(selectedModel?.downloadable);
+  $: localModelReady = Boolean(config?.ct2ModelPath && config?.ct2TokenizerPath);
 
   const languageAliases: Record<string, string[]> = {
     auto: ["auto"],
@@ -138,17 +153,172 @@
     zho_Hans: ["zho_Hans", "zh"],
     ja: ["ja", "jpn_Jpan"],
     jpn_Jpan: ["jpn_Jpan", "ja"],
+    it: ["it", "ita_Latn"],
+    ita_Latn: ["ita_Latn", "it"],
+    pt: ["pt", "por_Latn"],
+    por_Latn: ["por_Latn", "pt"],
+    tr: ["tr", "tur_Latn"],
+    tur_Latn: ["tur_Latn", "tr"],
+    ko: ["ko", "kor_Hang"],
+    kor_Hang: ["kor_Hang", "ko"],
   };
+
+  const languageSearchAliases: Record<string, string[]> = {
+    auto: ["auto", "detect", "авто", "автоопределение", "automaticky"],
+    en: ["english", "английский", "англ", "anglictina", "angličtina"],
+    eng_Latn: ["english", "английский", "англ", "anglictina", "angličtina"],
+    ru: ["russian", "русский", "рус", "rustina", "ruština"],
+    rus_Cyrl: ["russian", "русский", "рус", "rustina", "ruština"],
+    sk: ["slovak", "словацкий", "slovencina", "slovenčina"],
+    slk_Latn: ["slovak", "словацкий", "slovencina", "slovenčina"],
+    cs: ["czech", "чешский", "cestina", "čeština"],
+    ces_Latn: ["czech", "чешский", "cestina", "čeština"],
+    de: ["german", "немецкий", "nemcina", "nemčina"],
+    deu_Latn: ["german", "немецкий", "nemcina", "nemčina"],
+    uk: ["ukrainian", "украинский", "ukrajincina", "ukrajinčina"],
+    ukr_Cyrl: ["ukrainian", "украинский", "ukrajincina", "ukrajinčina"],
+    pl: ["polish", "польский", "polstina", "poľština"],
+    pol_Latn: ["polish", "польский", "polstina", "poľština"],
+    fr: ["french", "французский", "francuzstina", "francúzština"],
+    fra_Latn: ["french", "французский", "francuzstina", "francúzština"],
+    es: ["spanish", "испанский", "spanielcina", "španielčina"],
+    spa_Latn: ["spanish", "испанский", "spanielcina", "španielčina"],
+    zh: ["chinese", "китайский", "cinstina", "čínština"],
+    zho_Hans: ["chinese", "китайский", "cinstina", "čínština"],
+    ja: ["japanese", "японский", "japoncina", "japončina"],
+    jpn_Jpan: ["japanese", "японский", "japoncina", "japončina"],
+    it: ["italian", "итальянский", "taliancina", "taliančina"],
+    ita_Latn: ["italian", "итальянский", "taliancina", "taliančina"],
+    pt: ["portuguese", "португальский", "portugalcina", "portugalčina"],
+    por_Latn: ["portuguese", "португальский", "portugalcina", "portugalčina"],
+    tr: ["turkish", "турецкий", "turectina", "turečtina"],
+    tur_Latn: ["turkish", "турецкий", "turectina", "turečtina"],
+    ko: ["korean", "корейский", "korejcina", "kórejčina"],
+    kor_Hang: ["korean", "корейский", "korejcina", "kórejčina"],
+  };
+
+  const helpTexts = {
+    openaiEndpoint: {
+      en: "Advanced only. Used by GGUF/custom profiles when you run your own local HTTP translation server, for example llama.cpp.",
+      ru: "Только для advanced-сценария. Нужно GGUF/custom профилям, если ты сам запускаешь локальный HTTP сервер перевода, например llama.cpp.",
+      sk: "Iba pre pokročilé nastavenie. Používa sa pri GGUF/custom profiloch, keď spúšťaš vlastný lokálny HTTP prekladový server, napríklad llama.cpp.",
+    },
+    openaiModel: {
+      en: "Model id sent to an OpenAI-compatible local server. Some local servers ignore it, some require the loaded model name.",
+      ru: "ID модели, который отправляется OpenAI-compatible локальному серверу. Некоторые серверы игнорируют его, другим нужно имя загруженной модели.",
+      sk: "ID modelu posielané lokálnemu OpenAI-compatible serveru. Niektoré servery ho ignorujú, iné vyžadujú názov načítaného modelu.",
+    },
+    ct2ModelPath: {
+      en: "Folder with converted CTranslate2 model files. The NLLB download button fills this automatically.",
+      ru: "Папка с файлами CTranslate2-модели. Кнопка скачивания NLLB заполняет это автоматически.",
+      sk: "Priečinok so súbormi konvertovaného CTranslate2 modelu. Tlačidlo na stiahnutie NLLB to vyplní automaticky.",
+    },
+    ct2TokenizerPath: {
+      en: "Usually the same downloaded NLLB folder. Advanced users can point it to a Hugging Face tokenizer id.",
+      ru: "Обычно та же скачанная папка NLLB. Продвинутые пользователи могут указать Hugging Face tokenizer id.",
+      sk: "Zvyčajne rovnaký stiahnutý priečinok NLLB. Pokročilí používatelia môžu zadať Hugging Face tokenizer id.",
+    },
+    ct2HelperCommand: {
+      en: "Command Waylate runs for NLLB translation. Installed releases include waylate-ct2-translate.",
+      ru: "Команда, которую Waylate запускает для NLLB-перевода. В релизах она ставится как waylate-ct2-translate.",
+      sk: "Príkaz, ktorý Waylate spúšťa na NLLB preklad. Inštalované releasy obsahujú waylate-ct2-translate.",
+    },
+    device: {
+      en: "auto tries CUDA when CTranslate2 sees a CUDA device, otherwise CPU. CUDA is faster but uses VRAM while translating.",
+      ru: "auto пробует CUDA, если CTranslate2 видит CUDA-устройство, иначе CPU. CUDA быстрее, но во время перевода занимает VRAM.",
+      sk: "auto skúsi CUDA, keď CTranslate2 vidí CUDA zariadenie, inak CPU. CUDA je rýchlejšia, ale počas prekladu používa VRAM.",
+    },
+    history: {
+      en: "When enabled, translations are stored locally in SQLite. Nothing is uploaded because of history.",
+      ru: "Если включено, переводы сохраняются локально в SQLite. Из-за истории ничего не отправляется в сеть.",
+      sk: "Ak je zapnuté, preklady sa ukladajú lokálne do SQLite. História nič neodosiela do siete.",
+    },
+    autostart: {
+      en: "Starts Waylate in the background so the tray and shortcut workflow are ready after login.",
+      ru: "Запускает Waylate в фоне, чтобы tray и shortcut были готовы после входа в систему.",
+      sk: "Spustí Waylate na pozadí, aby bol tray a workflow so skratkou pripravený po prihlásení.",
+    },
+    networkApis: {
+      en: "Allows cloud providers. Keep this off if you only want local translation.",
+      ru: "Разрешает облачные провайдеры. Оставь выключенным, если нужен только локальный перевод.",
+      sk: "Povolí cloudových providerov. Nechaj vypnuté, ak chceš iba lokálny preklad.",
+    },
+    deeplKey: {
+      en: "DeepL Free/Pro API key. Text is sent to DeepL only when the DeepL profile is selected and network providers are enabled.",
+      ru: "API-ключ DeepL Free/Pro. Текст отправляется в DeepL только когда выбран профиль DeepL и включены сетевые провайдеры.",
+      sk: "API kľúč DeepL Free/Pro. Text sa odošle do DeepL iba keď je vybraný DeepL profil a sieťoví provideri sú povolení.",
+    },
+    googleKey: {
+      en: "Google Cloud Translation API key. The user owns the Cloud project and quota.",
+      ru: "API-ключ Google Cloud Translation. Пользователь сам владеет Cloud-проектом и квотой.",
+      sk: "API kľúč Google Cloud Translation. Používateľ vlastní Cloud projekt a kvótu.",
+    },
+    yandexKey: {
+      en: "Yandex Cloud Translate API key. You also need a Folder ID below.",
+      ru: "API-ключ Yandex Cloud Translate. Ещё нужен Folder ID ниже.",
+      sk: "API kľúč Yandex Cloud Translate. Nižšie treba zadať aj Folder ID.",
+    },
+    yandexFolderId: {
+      en: "Required by Yandex Cloud Translate v2 to choose the cloud folder that owns billing and permissions.",
+      ru: "Нужен Yandex Cloud Translate v2, чтобы выбрать cloud folder с биллингом и правами доступа.",
+      sk: "Vyžaduje ho Yandex Cloud Translate v2 na výber cloud priečinka s billingom a oprávneniami.",
+    },
+    localBearer: {
+      en: "Optional password for an advanced local OpenAI-compatible server. Most users should leave it empty.",
+      ru: "Необязательный пароль для advanced локального OpenAI-compatible сервера. Большинству пользователей это поле не нужно.",
+      sk: "Voliteľné heslo pre pokročilý lokálny OpenAI-compatible server. Väčšina používateľov ho nepotrebuje.",
+    },
+    uiLanguage: {
+      en: "Controls explanatory tooltips. Full interface translation can be expanded later.",
+      ru: "Меняет язык поясняющих подсказок. Полный перевод интерфейса можно расширить позже.",
+      sk: "Mení jazyk vysvetľujúcich tooltipov. Plný preklad rozhrania sa dá rozšíriť neskôr.",
+    },
+  } as const;
 
   onMount(() => {
     let unlisten: (() => void) | undefined;
+    const savedScale = Number(localStorage.getItem("waylate-ui-scale"));
+    setUiScale(Number.isFinite(savedScale) ? savedScale : 1);
+    const handleKeydown = (event: KeyboardEvent) => {
+      if (!event.ctrlKey) return;
+      if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        setUiScale(uiScale + 0.1);
+      } else if (event.key === "-") {
+        event.preventDefault();
+        setUiScale(uiScale - 0.1);
+      } else if (event.key === "0") {
+        event.preventDefault();
+        setUiScale(1);
+      }
+    };
+    const handleWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      setUiScale(uiScale + (event.deltaY < 0 ? 0.1 : -0.1));
+    };
+    window.addEventListener("keydown", handleKeydown);
+    window.addEventListener("wheel", handleWheel, { passive: false });
     void (async () => {
       await refresh();
+      if (config && !config.ct2ModelPath) {
+        tab = "settings";
+      }
       await consumePending();
       unlisten = await listen("waylate-pending", consumePending);
     })();
-    return () => unlisten?.();
+    return () => {
+      unlisten?.();
+      window.removeEventListener("keydown", handleKeydown);
+      window.removeEventListener("wheel", handleWheel);
+    };
   });
+
+  function setUiScale(next: number) {
+    uiScale = Math.min(1.8, Math.max(0.75, Math.round(next * 10) / 10));
+    document.documentElement.style.setProperty("--ui-scale", String(uiScale));
+    localStorage.setItem("waylate-ui-scale", String(uiScale));
+  }
 
   async function refresh() {
     snapshot = await invoke<Snapshot>("get_snapshot");
@@ -273,6 +443,7 @@
       await invoke("save_api_key", { provider, key: value });
       deeplKey = "";
       googleKey = "";
+      yandexKey = "";
       localKey = "";
       await refresh();
       status = "API key saved in Secret Service.";
@@ -297,8 +468,9 @@
     busy = true;
     error = "";
     try {
-      const path = await invoke<string>("download_catalog_model", { modelId: config.modelId });
-      status = `Downloaded to ${path}`;
+      const path = await invoke<string>("download_catalog_model", { modelId: "nllb-200-ct2" });
+      await refresh();
+      status = `Downloaded and configured: ${path}`;
     } catch (err) {
       error = String(err);
     } finally {
@@ -322,6 +494,43 @@
   async function revealModelsDir() {
     if (snapshot) await reveal(snapshot.paths.modelsDir);
   }
+
+  function selectLanguage(kind: "source" | "target", code: string) {
+    if (!config) return;
+    if (kind === "source") {
+      config.sourceLang = code;
+      sourceLanguageQuery = "";
+      sourceLanguageOpen = false;
+    } else {
+      config.targetLang = code;
+      targetLanguageQuery = "";
+      targetLanguageOpen = false;
+    }
+  }
+
+  function languageLabel(code: string) {
+    return languages.find((language) => language.code === code)?.name ?? code;
+  }
+
+  function languageSearchText(language: Language) {
+    return [language.code, language.name, ...(languageSearchAliases[language.code] ?? [])]
+      .join(" ")
+      .toLocaleLowerCase();
+  }
+
+  function filteredLanguages(query: string, includeAuto: boolean) {
+    const normalized = query.trim().toLocaleLowerCase();
+    return languages
+      .filter((language) => includeAuto || language.code !== "auto")
+      .filter((language) => !normalized || languageSearchText(language).includes(normalized))
+      .slice(0, 36);
+  }
+
+  function help(key: keyof typeof helpTexts) {
+    const lang = config?.uiLanguage === "ru" || config?.uiLanguage === "sk" ? config.uiLanguage : "en";
+    return helpTexts[key][lang];
+  }
+
 </script>
 
 <svelte:head>
@@ -356,28 +565,61 @@
               {/each}
             </select>
           </label>
-          <label>
+          <label class="combo-label">
             From
-            <select bind:value={config.sourceLang}>
-              {#each languages as language}
-                <option value={language.code}>{language.name}</option>
-              {/each}
-            </select>
+            <div class="combo">
+              <button type="button" class="combo-button" on:click={() => (sourceLanguageOpen = !sourceLanguageOpen)}>
+                <span>{languageLabel(config.sourceLang)}</span>
+                <ChevronDown size={14} />
+              </button>
+              {#if sourceLanguageOpen}
+                <div class="combo-menu">
+                  <input bind:value={sourceLanguageQuery} placeholder="Search language" />
+                  <div class="combo-options">
+                    {#each filteredLanguages(sourceLanguageQuery, true) as language}
+                      <button type="button" class:active={language.code === config.sourceLang} on:click={() => selectLanguage("source", language.code)}>
+                        <span>{language.name}</span>
+                        <small>{language.code}</small>
+                      </button>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+            </div>
           </label>
           <button class="icon" title="Swap languages" on:click={swapLanguages} disabled={config.sourceLang === "auto"}>
             <Repeat2 size={15} />
           </button>
-          <label>
+          <label class="combo-label">
             To
-            <select bind:value={config.targetLang}>
-              {#each languages.filter((language) => language.code !== "auto") as language}
-                <option value={language.code}>{language.name}</option>
-              {/each}
-            </select>
+            <div class="combo">
+              <button type="button" class="combo-button" on:click={() => (targetLanguageOpen = !targetLanguageOpen)}>
+                <span>{languageLabel(config.targetLang)}</span>
+                <ChevronDown size={14} />
+              </button>
+              {#if targetLanguageOpen}
+                <div class="combo-menu">
+                  <input bind:value={targetLanguageQuery} placeholder="Search language" />
+                  <div class="combo-options">
+                    {#each filteredLanguages(targetLanguageQuery, false) as language}
+                      <button type="button" class:active={language.code === config.targetLang} on:click={() => selectLanguage("target", language.code)}>
+                        <span>{language.name}</span>
+                        <small>{language.code}</small>
+                      </button>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+            </div>
           </label>
           <button class="primary run" on:click={translate} disabled={busy}>
             <span class:spin={busy}><RefreshCw size={15} /></span> Translate
           </button>
+          <div class="zoom-controls" aria-label="Interface zoom">
+            <button class="icon small" title="Zoom out" aria-label="Zoom out" on:click={() => setUiScale(uiScale - 0.1)}><ZoomOut size={13} /></button>
+            <button class="zoom-value" title="Reset zoom" on:click={() => setUiScale(1)}>{Math.round(uiScale * 100)}%</button>
+            <button class="icon small" title="Zoom in" aria-label="Zoom in" on:click={() => setUiScale(uiScale + 0.1)}><ZoomIn size={13} /></button>
+          </div>
         </section>
 
         <section class="translate-grid">
@@ -415,57 +657,85 @@
       {:else if tab === "settings"}
         <section class="settings-grid">
         <div class="group">
-          <h2>Local backend</h2>
-          <label>
-            OpenAI-compatible endpoint
-            <input bind:value={config.openaiEndpoint} placeholder="http://127.0.0.1:8080/v1/chat/completions" />
-          </label>
-          <label>
-            Model name
-            <input bind:value={config.openaiModel} placeholder="local-translation-model" />
-          </label>
-          <label>
-            CTranslate2 model path
-            <input bind:value={config.ct2ModelPath} placeholder="/home/user/.local/share/Waylate/models/nllb" />
-          </label>
-          <label>
-            Tokenizer path or HF id
-            <input bind:value={config.ct2TokenizerPath} placeholder="facebook/nllb-200-distilled-600M" />
-          </label>
-          <label>
-            CTranslate2 helper command
-            <input bind:value={config.ct2HelperCommand} placeholder="waylate-ct2-translate" />
-          </label>
-          <label>
-            Device
-            <select bind:value={config.ct2Device}>
-              <option value="auto">auto</option>
-              <option value="cuda">cuda</option>
-              <option value="cpu">cpu</option>
-            </select>
-          </label>
-          <div class="actions">
-            <button class="primary" on:click={saveSettings}><Save size={16} /> Save</button>
-            <button on:click={downloadModel} disabled={!canDownload || busy}><Download size={16} /> Download catalog model</button>
+          <div class="group-head">
+            <h2>Local model</h2>
+            {#if localModelReady}
+              <span class="pill ok"><CheckCircle2 size={13} /> Ready</span>
+            {:else}
+              <span class="pill">Setup needed</span>
+            {/if}
           </div>
+          <p class="muted">Recommended path: download NLLB, then translate locally without sending text to a cloud API.</p>
+          <div class="actions">
+            <button class="primary" on:click={downloadModel} disabled={busy}>
+              <Download size={16} /> Download and configure NLLB
+            </button>
+            <button on:click={saveSettings}><Save size={16} /> Save</button>
+          </div>
+          <div class="setup-list">
+            <span class:ok={Boolean(config.ct2ModelPath)}>Model path</span>
+            <span class:ok={Boolean(config.ct2TokenizerPath)}>Tokenizer</span>
+            <span class:ok={snapshot.environment.hasPython}>Python</span>
+            <span class:ok={snapshot.environment.hasNvidiaSmi || snapshot.environment.hasRocmSmi || config.ct2Device === "cpu"}>Device</span>
+          </div>
+          <details>
+            <summary>Advanced local backend</summary>
+            <label>
+              <span>OpenAI-compatible endpoint <span class="help" title={help("openaiEndpoint")}><CircleHelp size={13} /></span></span>
+              <input bind:value={config.openaiEndpoint} placeholder="http://127.0.0.1:8080/v1/chat/completions" />
+            </label>
+            <label>
+              <span>Model name <span class="help" title={help("openaiModel")}><CircleHelp size={13} /></span></span>
+              <input bind:value={config.openaiModel} placeholder="local-translation-model" />
+            </label>
+            <label>
+              <span>CTranslate2 model path <span class="help" title={help("ct2ModelPath")}><CircleHelp size={13} /></span></span>
+              <input bind:value={config.ct2ModelPath} placeholder="/home/user/.local/share/Waylate/models/nllb-200-ct2" />
+            </label>
+            <label>
+              <span>Tokenizer path or HF id <span class="help" title={help("ct2TokenizerPath")}><CircleHelp size={13} /></span></span>
+              <input bind:value={config.ct2TokenizerPath} placeholder="same as model path" />
+            </label>
+            <label>
+              <span>CTranslate2 helper command <span class="help" title={help("ct2HelperCommand")}><CircleHelp size={13} /></span></span>
+              <input bind:value={config.ct2HelperCommand} placeholder="waylate-ct2-translate" />
+            </label>
+            <label>
+              <span>Device <span class="help" title={help("device")}><CircleHelp size={13} /></span></span>
+              <select bind:value={config.ct2Device}>
+                <option value="auto">auto</option>
+                <option value="cuda">cuda</option>
+                <option value="cpu">cpu</option>
+              </select>
+            </label>
+          </details>
         </div>
 
         <div class="group">
-          <h2>Privacy and API</h2>
+          <h2>Privacy and APIs</h2>
+          <label>
+            <span>Interface language <span class="help" title={help("uiLanguage")}><CircleHelp size={13} /></span></span>
+            <select bind:value={config.uiLanguage}>
+              <option value="en">English</option>
+              <option value="ru">Русский</option>
+              <option value="sk">Slovenčina</option>
+            </select>
+          </label>
           <label class="check">
             <input type="checkbox" bind:checked={config.historyEnabled} />
-            Save translation history locally
+            <span>Save translation history locally <span class="help" title={help("history")}><CircleHelp size={13} /></span></span>
           </label>
           <label class="check">
             <input type="checkbox" bind:checked={config.autostart} />
-            Start Waylate in background
+            <span>Start Waylate in background <span class="help" title={help("autostart")}><CircleHelp size={13} /></span></span>
           </label>
           <label class="check">
             <input type="checkbox" bind:checked={config.apiProviderEnabled} />
-            Allow network API providers
+            <span>Allow network API providers <span class="help" title={help("networkApis")}><CircleHelp size={13} /></span></span>
           </label>
+          <p class="muted">DeepL, Google and Yandex need your own key. Waylate stores keys in Secret Service, not in config.json.</p>
           <label>
-            DeepL API key {snapshot.hasDeeplKey ? "(saved)" : ""}
+            <span>DeepL API key {snapshot.hasDeeplKey ? "(saved)" : ""} <span class="help" title={help("deeplKey")}><CircleHelp size={13} /></span></span>
             <div class="inline">
               <input bind:value={deeplKey} type="password" placeholder="Stored in Secret Service" />
               <button on:click={() => saveKey("deepl", deeplKey)} disabled={!deeplKey}><Save size={15} /></button>
@@ -473,7 +743,7 @@
             </div>
           </label>
           <label>
-            Google API key {snapshot.hasGoogleKey ? "(saved)" : ""}
+            <span>Google API key {snapshot.hasGoogleKey ? "(saved)" : ""} <span class="help" title={help("googleKey")}><CircleHelp size={13} /></span></span>
             <div class="inline">
               <input bind:value={googleKey} type="password" placeholder="Stored in Secret Service" />
               <button on:click={() => saveKey("google", googleKey)} disabled={!googleKey}><Save size={15} /></button>
@@ -481,7 +751,19 @@
             </div>
           </label>
           <label>
-            Local bearer token {snapshot.hasLocalKey ? "(saved)" : ""}
+            <span>Yandex API key {snapshot.hasYandexKey ? "(saved)" : ""} <span class="help" title={help("yandexKey")}><CircleHelp size={13} /></span></span>
+            <div class="inline">
+              <input bind:value={yandexKey} type="password" placeholder="Stored in Secret Service" />
+              <button on:click={() => saveKey("yandex", yandexKey)} disabled={!yandexKey}><Save size={15} /></button>
+              <button on:click={() => clearKey("yandex")}><Trash2 size={15} /></button>
+            </div>
+          </label>
+          <label>
+            <span>Yandex Folder ID <span class="help" title={help("yandexFolderId")}><CircleHelp size={13} /></span></span>
+            <input bind:value={config.yandexFolderId} placeholder="b1g..." />
+          </label>
+          <label>
+            <span>Local bearer token {snapshot.hasLocalKey ? "(saved)" : ""} <span class="help" title={help("localBearer")}><CircleHelp size={13} /></span></span>
             <div class="inline">
               <input bind:value={localKey} type="password" placeholder="Optional for local server" />
               <button on:click={() => saveKey("openai-compatible", localKey)} disabled={!localKey}><Save size={15} /></button>
@@ -544,6 +826,10 @@
     box-sizing: border-box;
   }
 
+  :global(:root) {
+    --ui-scale: 1;
+  }
+
   :global(html),
   :global(body) {
     height: 100%;
@@ -601,10 +887,13 @@
   }
 
   .shell {
-    height: 100vh;
+    width: calc(100vw / var(--ui-scale));
+    height: calc(100vh / var(--ui-scale));
     display: grid;
     grid-template-columns: 44px minmax(0, 1fr);
     overflow: hidden;
+    transform: scale(var(--ui-scale));
+    transform-origin: 0 0;
   }
 
   .rail {
@@ -627,6 +916,14 @@
     justify-content: center;
     font-size: 13px;
     font-weight: 800;
+  }
+
+  .mark:hover,
+  .mark:focus-visible {
+    color: #ffffff;
+    border-color: #183f3a;
+    background: #1e5d55;
+    box-shadow: 0 0 0 2px rgba(37, 107, 98, 0.18);
   }
 
   nav {
@@ -660,7 +957,7 @@
     min-height: 52px;
     padding: 8px 12px;
     display: grid;
-    grid-template-columns: minmax(150px, 1.5fr) minmax(110px, 1fr) 30px minmax(110px, 1fr) auto;
+    grid-template-columns: minmax(150px, 1.5fr) minmax(120px, 1fr) 30px minmax(120px, 1fr) auto auto;
     gap: 8px;
     align-items: end;
     border-bottom: 1px solid #d6dce0;
@@ -683,6 +980,81 @@
     border-radius: 6px;
     color: #14212a;
     background: #ffffff;
+  }
+
+  label > span,
+  .group-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .group-head {
+    justify-content: space-between;
+  }
+
+  .help {
+    display: inline-flex;
+    color: #69777f;
+  }
+
+  .combo {
+    position: relative;
+  }
+
+  .combo-button {
+    width: 100%;
+    justify-content: space-between;
+    background: #ffffff;
+  }
+
+  .combo-button span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .combo-menu {
+    position: absolute;
+    z-index: 20;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    min-width: 220px;
+    padding: 6px;
+    display: grid;
+    gap: 6px;
+    border: 1px solid #b8c4ca;
+    border-radius: 8px;
+    background: #ffffff;
+    box-shadow: 0 12px 30px rgba(24, 32, 38, 0.18);
+  }
+
+  .combo-options {
+    max-height: 220px;
+    display: grid;
+    gap: 3px;
+    overflow: auto;
+  }
+
+  .combo-options button {
+    width: 100%;
+    min-height: 30px;
+    justify-content: space-between;
+    border-color: transparent;
+    background: transparent;
+  }
+
+  .combo-options button:hover,
+  .combo-options button.active {
+    border-color: #c8d6dc;
+    background: #eef5f2;
+  }
+
+  .combo-options small {
+    color: #69777f;
+    font-size: 11px;
   }
 
   input,
@@ -712,6 +1084,18 @@
 
   .run {
     min-width: 96px;
+  }
+
+  .zoom-controls {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .zoom-value {
+    min-width: 44px;
+    padding: 0 6px;
+    font-size: 12px;
   }
 
   .translate-grid {
@@ -789,6 +1173,76 @@
     border: 1px solid #d6dce0;
     border-radius: 8px;
     background: #ffffff;
+  }
+
+  .muted {
+    margin: 0;
+    color: #5f6f77;
+    font-size: 13px;
+    line-height: 1.4;
+  }
+
+  .pill {
+    min-height: 24px;
+    padding: 3px 8px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: 1px solid #cfd6da;
+    border-radius: 999px;
+    color: #6d4b34;
+    background: #fff7ed;
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .pill.ok {
+    color: #1f6848;
+    border-color: #acd7bd;
+    background: #effaf3;
+  }
+
+  .setup-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+
+  .setup-list span {
+    min-height: 26px;
+    padding: 4px 8px;
+    border: 1px solid #d4b9aa;
+    border-radius: 6px;
+    color: #7b4a37;
+    background: #fff7f2;
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .setup-list span.ok {
+    color: #1f6848;
+    background: #effaf3;
+    border-color: #acd7bd;
+  }
+
+  details {
+    display: grid;
+    gap: 10px;
+  }
+
+  summary {
+    cursor: pointer;
+    color: #34454f;
+    font-size: 13px;
+    font-weight: 800;
+  }
+
+  details[open] {
+    gap: 12px;
+  }
+
+  details[open] label {
+    margin-top: 10px;
   }
 
   .group.wide {

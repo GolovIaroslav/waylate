@@ -40,6 +40,7 @@ pub fn translate(config: &AppConfig, request: &TranslationRequest) -> Result<Tra
         ProviderKind::CTranslate2 => translate_ctranslate2(config, request),
         ProviderKind::DeepL => translate_deepl(config, request),
         ProviderKind::Google => translate_google(config, request),
+        ProviderKind::Yandex => translate_yandex(config, request),
     }
 }
 
@@ -196,6 +197,45 @@ fn translate_google(config: &AppConfig, request: &TranslationRequest) -> Result<
         translated_text: translated.to_string(),
         provider_label: "Google Cloud Translate".into(),
         warning: Some("Text was sent to Google because the Google profile is selected.".into()),
+    })
+}
+
+fn translate_yandex(config: &AppConfig, request: &TranslationRequest) -> Result<TranslationResponse, String> {
+    ensure_network_enabled(config)?;
+    let key = secrets::get("yandex")?;
+    if config.yandex_folder_id.trim().is_empty() {
+        return Err("Yandex Cloud Translate needs a Folder ID in Settings.".into());
+    }
+
+    let mut body = json!({
+        "folderId": config.yandex_folder_id.trim(),
+        "targetLanguageCode": request.target_lang,
+        "texts": [request.text],
+    });
+    if request.source_lang != "auto" {
+        body["sourceLanguageCode"] = json!(request.source_lang);
+    }
+
+    let value: Value = Client::new()
+        .post("https://translate.api.cloud.yandex.net/translate/v2/translate")
+        .header("Authorization", format!("Api-Key {key}"))
+        .json(&body)
+        .send()
+        .map_err(|err| format!("Could not reach Yandex Cloud Translate: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("Yandex Cloud Translate returned an error: {err}"))?
+        .json()
+        .map_err(|err| format!("Could not parse Yandex Cloud Translate response: {err}"))?;
+
+    let translated = value
+        .pointer("/translations/0/text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Yandex Cloud Translate response did not contain a translation".to_string())?;
+
+    Ok(TranslationResponse {
+        translated_text: translated.to_string(),
+        provider_label: "Yandex Cloud Translate".into(),
+        warning: Some("Text was sent to Yandex because the Yandex profile is selected.".into()),
     })
 }
 

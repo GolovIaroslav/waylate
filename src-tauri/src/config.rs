@@ -19,14 +19,16 @@ pub struct AppConfig {
     pub ct2_helper_command: String,
     pub ct2_device: String,
     pub api_provider_enabled: bool,
+    pub yandex_folder_id: String,
+    pub ui_language: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            model_id: "hy-mt-gguf".into(),
+            model_id: "nllb-200-ct2".into(),
             source_lang: "auto".into(),
-            target_lang: "en".into(),
+            target_lang: "eng_Latn".into(),
             history_enabled: false,
             autostart: true,
             openai_endpoint: "http://127.0.0.1:8080/v1/chat/completions".into(),
@@ -37,6 +39,8 @@ impl Default for AppConfig {
             ct2_helper_command: "waylate-ct2-translate".into(),
             ct2_device: "auto".into(),
             api_provider_enabled: false,
+            yandex_folder_id: String::new(),
+            ui_language: "en".into(),
         }
     }
 }
@@ -106,7 +110,8 @@ mod tests {
     #[test]
     fn config_defaults_keep_history_and_api_off() {
         let config = AppConfig::default();
-        assert_eq!(config.model_id, "hy-mt-gguf");
+        assert_eq!(config.model_id, "nllb-200-ct2");
+        assert_eq!(config.target_lang, "eng_Latn");
         assert!(!config.history_enabled);
         assert!(!config.api_provider_enabled);
         assert_eq!(config.ct2_helper_command, "waylate-ct2-translate");
