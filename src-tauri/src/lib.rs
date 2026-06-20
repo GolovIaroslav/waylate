@@ -8,9 +8,17 @@ mod translation;
 
 use chrono::Utc;
 use config::{AppConfig, AppPaths};
-use models::ModelProfile;
+use models::{ModelProfile, ProviderKind};
 use serde::{Deserialize, Serialize};
-use std::{process::Command, sync::Mutex};
+use serde_json::Value;
+use std::{
+    fs::{self, File},
+    io::{Read, Write},
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    process::Command,
+    sync::Mutex,
+};
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -21,6 +29,13 @@ use translation::{TranslationRequest, TranslationResponse};
 struct AppState {
     paths: AppPaths,
     pending: Mutex<Option<PendingRequest>>,
+    download: Mutex<DownloadControl>,
+}
+
+#[derive(Debug, Default)]
+struct DownloadControl {
+    active_model: Option<String>,
+    cancel_requested: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +79,23 @@ struct PathReport {
     data_dir: String,
     models_dir: String,
     history_db: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadProgress {
+    model_id: String,
+    status: String,
+    message: String,
+    progress: f64,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct HfFile {
+    path: String,
+    size: Option<u64>,
 }
 
 #[tauri::command]
@@ -170,42 +202,316 @@ fn reveal_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn download_catalog_model(state: State<'_, AppState>, model_id: String) -> Result<String, String> {
+fn cancel_model_download(state: State<'_, AppState>) -> Result<(), String> {
+    let mut download = state.download.lock().map_err(|_| "Download state is poisoned")?;
+    download.cancel_requested = true;
+    Ok(())
+}
+
+#[tauri::command]
+async fn download_catalog_model(app: AppHandle, state: State<'_, AppState>, model_id: String) -> Result<String, String> {
     let profile = models::catalog()
         .into_iter()
         .find(|item| item.id == model_id)
         .ok_or_else(|| "Unknown model profile".to_string())?;
     let repo = profile
         .hf_repo
+        .clone()
         .ok_or_else(|| "This model profile is not downloadable from the built-in catalog".to_string())?;
-    let target = state.paths.models_dir.join(&profile.id);
+
+    {
+        let mut download = state.download.lock().map_err(|_| "Download state is poisoned")?;
+        if download.active_model.is_some() {
+            return Err("Another model download is already running.".into());
+        }
+        download.active_model = Some(profile.id.clone());
+        download.cancel_requested = false;
+    }
+
+    let paths = state.paths.clone();
+    let app_for_download = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        download_huggingface_repo(&app_for_download, &paths, &profile, &repo)
+    })
+    .await
+    .map_err(|err| err.to_string())?;
+
+    {
+        let mut download = state.download.lock().map_err(|_| "Download state is poisoned")?;
+        download.active_model = None;
+        download.cancel_requested = false;
+    }
+
+    result
+}
+
+fn download_huggingface_repo(
+    app: &AppHandle,
+    paths: &AppPaths,
+    profile: &ModelProfile,
+    repo: &str,
+) -> Result<String, String> {
+    let target = paths.models_dir.join(&profile.id);
     std::fs::create_dir_all(&target).map_err(|err| err.to_string())?;
-    let output = Command::new("huggingface-cli")
-        .arg("download")
-        .arg(&repo)
-        .arg("--local-dir")
-        .arg(&target)
-        .output()
-        .map_err(|err| format!("Could not start huggingface-cli: {err}. Install it with: pipx install \"huggingface_hub[cli]\""))?;
+    emit_download(
+        app,
+        &profile.id,
+        "starting",
+        "Checking files",
+        0.02,
+        0,
+        None,
+    );
 
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    let client = reqwest::blocking::Client::new();
+    let files = huggingface_files(&client, repo)?;
+    if files.is_empty() {
+        return Err("Hugging Face repository has no downloadable files.".into());
+    }
+    let total = files.iter().filter_map(|file| file.size).sum::<u64>();
+    let total = if total > 0 { Some(total) } else { None };
+    let mut downloaded = existing_downloaded_bytes(&target, &files);
+
+    emit_download(
+        app,
+        &profile.id,
+        "downloading",
+        "Downloading",
+        download_ratio(downloaded, total),
+        downloaded,
+        total,
+    );
+
+    for file in files {
+        if is_download_cancelled(app, &profile.id)? {
+            emit_download(app, &profile.id, "cancelled", "Download cancelled", 0.0, downloaded, total);
+            return Err("Download cancelled.".into());
+        }
+
+        let local_path = target.join(&file.path);
+        if let Some(size) = file.size {
+            if local_path.exists()
+                && local_path.metadata().map(|metadata| metadata.len()).unwrap_or_default() == size
+            {
+                continue;
+            }
+        }
+        if let Some(parent) = local_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+
+        let url = format!("https://huggingface.co/{repo}/resolve/main/{}", file.path);
+        let mut response = client
+            .get(url)
+            .send()
+            .map_err(|err| format!("Could not download {}: {err}", file.path))?
+            .error_for_status()
+            .map_err(|err| format!("Hugging Face returned an error for {}: {err}", file.path))?;
+        let mut output = File::create(&local_path)
+            .map_err(|err| format!("Could not create {}: {err}", local_path.display()))?;
+        let mut buffer = [0_u8; 128 * 1024];
+        let mut file_downloaded = 0_u64;
+        loop {
+            if is_download_cancelled(app, &profile.id)? {
+                emit_download(app, &profile.id, "cancelled", "Download cancelled", 0.0, downloaded, total);
+                return Err("Download cancelled.".into());
+            }
+            let read = response
+                .read(&mut buffer)
+                .map_err(|err| format!("Could not read {}: {err}", file.path))?;
+            if read == 0 {
+                break;
+            }
+            output
+                .write_all(&buffer[..read])
+                .map_err(|err| format!("Could not write {}: {err}", local_path.display()))?;
+            file_downloaded += read as u64;
+            downloaded += read as u64;
+            emit_download(
+                app,
+                &profile.id,
+                "downloading",
+                &file.path,
+                download_ratio(downloaded, total),
+                downloaded,
+                total,
+            );
+        }
+        if let Some(expected) = file.size {
+            if file_downloaded != expected {
+                return Err(format!(
+                    "Downloaded {} bytes for {}, expected {}.",
+                    file_downloaded, file.path, expected
+                ));
+            }
+        }
     }
 
-    let mut config = config::load(&state.paths)?;
-    if profile.id == "nllb-200-ct2" {
-        config.model_id = profile.id.clone();
-        config.ct2_model_path = target.display().to_string();
-        config.ct2_tokenizer_path = target.display().to_string();
-        config.ct2_device = if environment_report().has_nvidia_smi {
-            "cuda".into()
-        } else {
-            "cpu".into()
-        };
-        config::save(&state.paths, &config)?;
+    let mut config = config::load(paths)?;
+    config.model_id = profile.id.clone();
+    match profile.provider {
+        ProviderKind::CTranslate2 => {
+            emit_download(
+                app,
+                &profile.id,
+                "preparing",
+                "Preparing translator",
+                0.98,
+                downloaded,
+                total,
+            );
+            let helper = ensure_ct2_runtime(paths)?;
+            config.ct2_model_path = target.display().to_string();
+            config.ct2_tokenizer_path = target.display().to_string();
+            config.source_lang = "auto".into();
+            config.target_lang = "eng_Latn".into();
+            config.ct2_helper_command = helper;
+            config.ct2_device = "cpu".into();
+        }
+        ProviderKind::OpenAiCompatible => {
+            if let Some(endpoint) = &profile.default_endpoint {
+                config.openai_endpoint = endpoint.clone();
+            }
+            config.openai_model = profile.name.clone();
+            config.custom_model_path = target.display().to_string();
+        }
+        _ => {}
     }
+    config::save(paths, &config)?;
 
+    emit_download(app, &profile.id, "done", "Ready", 1.0, downloaded, total);
     Ok(target.display().to_string())
+}
+
+fn ensure_ct2_runtime(paths: &AppPaths) -> Result<String, String> {
+    let runtime_dir = paths.data_dir.join("runtime");
+    let bin_dir = runtime_dir.join("bin");
+    let python = bin_dir.join("python");
+    let helper = runtime_dir.join("waylate-ct2-translate");
+    if !python.exists() {
+        fs::create_dir_all(&runtime_dir).map_err(|err| err.to_string())?;
+        let output = Command::new("python3")
+            .arg("-m")
+            .arg("venv")
+            .arg(&runtime_dir)
+            .output()
+            .map_err(|err| format!("Could not create local Python runtime: {err}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+    }
+
+    let deps_ok = Command::new(&python)
+        .arg("-c")
+        .arg("import ctranslate2, transformers, sentencepiece")
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !deps_ok {
+        let output = Command::new(&python)
+            .arg("-m")
+            .arg("pip")
+            .arg("install")
+            .arg("--upgrade")
+            .arg("ctranslate2")
+            .arg("transformers")
+            .arg("sentencepiece")
+            .output()
+            .map_err(|err| format!("Could not install local translation runtime: {err}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+    }
+
+    let source = include_str!("../../scripts/waylate-ct2-translate");
+    let body = source
+        .lines()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&helper, format!("#!{}\n{body}\n", python.display()))
+        .map_err(|err| format!("Could not write helper: {err}"))?;
+    let mut permissions = fs::metadata(&helper)
+        .map_err(|err| err.to_string())?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&helper, permissions).map_err(|err| err.to_string())?;
+    Ok(helper.display().to_string())
+}
+
+fn huggingface_files(client: &reqwest::blocking::Client, repo: &str) -> Result<Vec<HfFile>, String> {
+    let url = format!("https://huggingface.co/api/models/{repo}");
+    let value: Value = client
+        .get(url)
+        .send()
+        .map_err(|err| format!("Could not reach Hugging Face: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("Hugging Face returned an error: {err}"))?
+        .json()
+        .map_err(|err| format!("Could not parse Hugging Face model metadata: {err}"))?;
+    let siblings = value
+        .get("siblings")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Hugging Face model metadata did not include files.".to_string())?;
+    Ok(siblings
+        .iter()
+        .filter_map(|item| {
+            let path = item.get("rfilename")?.as_str()?;
+            if path == ".gitattributes" {
+                return None;
+            }
+            Some(HfFile {
+                path: path.to_string(),
+                size: item.get("size").and_then(Value::as_u64),
+            })
+        })
+        .collect())
+}
+
+fn existing_downloaded_bytes(target: &Path, files: &[HfFile]) -> u64 {
+    files
+        .iter()
+        .filter_map(|file| {
+            let expected = file.size?;
+            let actual = target.join(&file.path).metadata().ok()?.len();
+            (actual == expected).then_some(actual)
+        })
+        .sum()
+}
+
+fn download_ratio(downloaded: u64, total: Option<u64>) -> f64 {
+    match total {
+        Some(total) if total > 0 => (downloaded as f64 / total as f64).clamp(0.02, 0.99),
+        _ => 0.15,
+    }
+}
+
+fn is_download_cancelled(app: &AppHandle, model_id: &str) -> Result<bool, String> {
+    let state = app.state::<AppState>();
+    let download = state.download.lock().map_err(|_| "Download state is poisoned")?;
+    Ok(download.active_model.as_deref() == Some(model_id) && download.cancel_requested)
+}
+
+fn emit_download(
+    app: &AppHandle,
+    model_id: &str,
+    status: &str,
+    message: &str,
+    progress: f64,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+) {
+    let _ = app.emit(
+        "model-download-progress",
+        DownloadProgress {
+            model_id: model_id.into(),
+            status: status.into(),
+            message: message.into(),
+            progress,
+            downloaded_bytes,
+            total_bytes,
+        },
+    );
 }
 
 fn read_selection_with_fallback() -> Result<(String, Option<String>), String> {
@@ -398,6 +704,7 @@ pub fn run() {
             app.manage(AppState {
                 paths,
                 pending: Mutex::new(None),
+                download: Mutex::new(DownloadControl::default()),
             });
             setup_tray(app)?;
             let args: Vec<String> = std::env::args().collect();
@@ -417,7 +724,8 @@ pub fn run() {
             get_history,
             clear_history,
             reveal_path,
-            download_catalog_model
+            download_catalog_model,
+            cancel_model_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running Waylate");
