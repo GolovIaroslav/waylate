@@ -285,91 +285,91 @@
 </svelte:head>
 
 <main class="shell">
-  <header class="topbar">
-    <div class="brand">
-      <Languages size={22} />
-      <div>
-        <strong>Waylate</strong>
-        <span>{snapshot?.environment.sessionType || "wayland"} / {snapshot?.environment.desktop || "desktop"}</span>
-      </div>
-    </div>
+  <aside class="rail">
+    <div class="mark" title="Waylate">W</div>
     <nav aria-label="Views">
-      <button class:active={tab === "translate"} on:click={() => (tab = "translate")}>
-        <Languages size={16} /> Translate
+      <button class:active={tab === "translate"} title="Translate" aria-label="Translate" on:click={() => (tab = "translate")}>
+        <Languages size={14} />
       </button>
-      <button class:active={tab === "settings"} on:click={() => (tab = "settings")}>
-        <Settings size={16} /> Settings
+      <button class:active={tab === "settings"} title="Settings" aria-label="Settings" on:click={() => (tab = "settings")}>
+        <Settings size={14} />
       </button>
-      <button class:active={tab === "history"} on:click={() => (tab = "history")}>
-        <History size={16} /> History
+      <button class:active={tab === "history"} title="History" aria-label="History" on:click={() => (tab = "history")}>
+        <History size={14} />
       </button>
     </nav>
-  </header>
+  </aside>
 
-  {#if config && snapshot}
-    {#if tab === "translate"}
-      <section class="toolbar" aria-label="Translation options">
-        <label>
-          Model
-          <select bind:value={config.modelId}>
-            {#each snapshot.catalog as model}
-              <option value={model.id}>{model.name}</option>
-            {/each}
-          </select>
-        </label>
-        <label>
-          From
-          <select bind:value={config.sourceLang}>
-            {#each languages as language}
-              <option value={language.code}>{language.name}</option>
-            {/each}
-          </select>
-        </label>
-        <button class="icon" title="Swap languages" on:click={swapLanguages} disabled={config.sourceLang === "auto"}>
-          <Repeat2 size={17} />
-        </button>
-        <label>
-          To
-          <select bind:value={config.targetLang}>
-            {#each languages.filter((language) => language.code !== "auto") as language}
-              <option value={language.code}>{language.name}</option>
-            {/each}
-          </select>
-        </label>
-        <button class="primary" on:click={translate} disabled={busy}>
-          <span class:spin={busy}><RefreshCw size={16} /></span> Translate
-        </button>
-      </section>
+  <section class="workspace">
+    {#if config && snapshot}
+      {#if tab === "translate"}
+        <section class="toolbar" aria-label="Translation options">
+          <label>
+            Model
+            <select bind:value={config.modelId}>
+              {#each snapshot.catalog as model}
+                <option value={model.id}>{model.name}</option>
+              {/each}
+            </select>
+          </label>
+          <label>
+            From
+            <select bind:value={config.sourceLang}>
+              {#each languages as language}
+                <option value={language.code}>{language.name}</option>
+              {/each}
+            </select>
+          </label>
+          <button class="icon" title="Swap languages" on:click={swapLanguages} disabled={config.sourceLang === "auto"}>
+            <Repeat2 size={15} />
+          </button>
+          <label>
+            To
+            <select bind:value={config.targetLang}>
+              {#each languages.filter((language) => language.code !== "auto") as language}
+                <option value={language.code}>{language.name}</option>
+              {/each}
+            </select>
+          </label>
+          <button class="primary run" on:click={translate} disabled={busy}>
+            <span class:spin={busy}><RefreshCw size={15} /></span> Translate
+          </button>
+        </section>
 
-      <section class="translate-grid">
-        <div class="pane">
-          <div class="pane-head">
-            <span>Source</span>
-            <div>
-              <button title="Read Wayland selection" on:click={pasteSelection}><Languages size={15} /> Selection</button>
-              <button title="Paste clipboard" on:click={pasteClipboard}><Clipboard size={15} /> Clipboard</button>
+        <section class="translate-grid">
+          <div class="pane">
+            <div class="pane-head">
+              <span>Source</span>
+            </div>
+            <textarea bind:value={sourceText} spellcheck="false" placeholder="Paste text or run waylate translate-selection"></textarea>
+            <div class="pane-actions">
+              <button class="icon small" title="Read Wayland selection" aria-label="Read Wayland selection" on:click={pasteSelection}>
+                <Languages size={13} />
+              </button>
+              <button class="icon small" title="Paste clipboard" aria-label="Paste clipboard" on:click={pasteClipboard}>
+                <Clipboard size={13} />
+              </button>
             </div>
           </div>
-          <textarea bind:value={sourceText} spellcheck="false" placeholder="Paste or select text, then run waylate translate-selection"></textarea>
-        </div>
-        <div class="pane">
-          <div class="pane-head">
-            <span>Translation</span>
-            <button title="Copy translation" on:click={copyTranslation} disabled={!translatedText.trim()}>
-              <Copy size={15} /> Copy
-            </button>
+          <div class="pane">
+            <div class="pane-head">
+              <span>Translation</span>
+            </div>
+            <textarea bind:value={translatedText} spellcheck="false" readonly placeholder="Translation appears here"></textarea>
+            <div class="pane-actions end">
+              <button class="icon small" title="Copy translation" aria-label="Copy translation" on:click={copyTranslation} disabled={!translatedText.trim()}>
+                <Copy size={13} />
+              </button>
+            </div>
           </div>
-          <textarea bind:value={translatedText} spellcheck="false" readonly placeholder="Translation appears here"></textarea>
-        </div>
-      </section>
+        </section>
 
-      <section class="model-note">
-        <strong>{selectedModel?.name}</strong>
-        <span>{selectedModel?.description}</span>
-        <small>{selectedModel?.engineHint}</small>
-      </section>
-    {:else if tab === "settings"}
-      <section class="settings-grid">
+        <section class="model-note">
+          <strong>{selectedModel?.name}</strong>
+          <span>{selectedModel?.description}</span>
+        </section>
+      {:else if tab === "settings"}
+        <section class="settings-grid">
         <div class="group">
           <h2>Local backend</h2>
           <label>
@@ -460,9 +460,9 @@
             <button on:click={revealModelsDir}><FolderOpen size={16} /> Models</button>
           </div>
         </div>
-      </section>
-    {:else}
-      <section class="history-list">
+        </section>
+      {:else}
+        <section class="history-list">
         <div class="history-head">
           <strong>Local history</strong>
           <button on:click={clearLocalHistory} disabled={!snapshot.history.length}><Trash2 size={16} /> Clear</button>
@@ -480,23 +480,30 @@
             </article>
           {/each}
         {/if}
-      </section>
+        </section>
+      {/if}
+    {:else}
+      <section class="loading">Loading Waylate...</section>
     {/if}
-  {:else}
-    <section class="loading">Loading Waylate...</section>
-  {/if}
 
-  {#if status}
-    <p class="status">{status}</p>
-  {/if}
-  {#if error}
-    <p class="error">{error}</p>
-  {/if}
+    {#if status}
+      <p class="status">{status}</p>
+    {/if}
+    {#if error}
+      <p class="error">{error}</p>
+    {/if}
+  </section>
 </main>
 
 <style>
   :global(*) {
     box-sizing: border-box;
+  }
+
+  :global(html),
+  :global(body) {
+    height: 100%;
+    overflow: hidden;
   }
 
   :global(body) {
@@ -516,7 +523,7 @@
   }
 
   button {
-    min-height: 34px;
+    min-height: 30px;
     border: 1px solid #c4cbd0;
     border-radius: 6px;
     color: #16202a;
@@ -524,8 +531,8 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 7px;
-    padding: 0 11px;
+    gap: 6px;
+    padding: 0 9px;
     cursor: pointer;
   }
 
@@ -550,40 +557,45 @@
   }
 
   .shell {
-    min-height: 100vh;
+    height: 100vh;
     display: grid;
-    grid-template-rows: auto auto 1fr auto;
+    grid-template-columns: 44px minmax(0, 1fr);
+    overflow: hidden;
   }
 
-  .topbar {
-    height: 58px;
-    padding: 0 18px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    border-bottom: 1px solid #d6dce0;
+  .rail {
+    padding: 8px 6px;
+    display: grid;
+    grid-template-rows: 32px 1fr;
+    gap: 10px;
+    border-right: 1px solid #d6dce0;
     background: #ffffff;
   }
 
-  .brand {
+  .mark {
+    width: 30px;
+    height: 30px;
+    border-radius: 7px;
+    color: #ffffff;
+    background: #256b62;
     display: flex;
     align-items: center;
-    gap: 10px;
-  }
-
-  .brand div {
-    display: grid;
-    gap: 1px;
-  }
-
-  .brand span {
-    color: #60707a;
-    font-size: 12px;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 800;
   }
 
   nav {
-    display: flex;
-    gap: 8px;
+    display: grid;
+    align-content: start;
+    gap: 7px;
+  }
+
+  nav button {
+    width: 30px;
+    height: 30px;
+    min-height: 30px;
+    padding: 0;
   }
 
   nav button.active {
@@ -592,12 +604,20 @@
     background: #364852;
   }
 
-  .toolbar {
-    min-height: 66px;
-    padding: 12px 18px;
+  .workspace {
+    min-width: 0;
+    min-height: 0;
     display: grid;
-    grid-template-columns: 1.5fr 1fr 36px 1fr auto;
-    gap: 10px;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    overflow: hidden;
+  }
+
+  .toolbar {
+    min-height: 52px;
+    padding: 8px 12px;
+    display: grid;
+    grid-template-columns: minmax(150px, 1.5fr) minmax(110px, 1fr) 30px minmax(110px, 1fr) auto;
+    gap: 8px;
     align-items: end;
     border-bottom: 1px solid #d6dce0;
     background: #edf2ef;
@@ -623,38 +643,51 @@
 
   input,
   select {
-    height: 34px;
-    padding: 0 9px;
+    height: 30px;
+    padding: 0 8px;
   }
 
   textarea {
-    min-height: 285px;
-    height: calc(100vh - 255px);
+    min-height: 0;
+    height: 100%;
     resize: none;
-    padding: 13px;
+    padding: 10px;
     line-height: 1.45;
   }
 
   .icon {
-    width: 36px;
+    width: 30px;
     padding: 0;
   }
 
+  .small {
+    width: 26px;
+    height: 26px;
+    min-height: 26px;
+  }
+
+  .run {
+    min-width: 96px;
+  }
+
   .translate-grid {
-    padding: 16px 18px 10px;
+    min-height: 0;
+    padding: 10px 12px 6px;
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 14px;
+    gap: 10px;
   }
 
   .pane {
     min-width: 0;
+    min-height: 0;
     display: grid;
-    gap: 8px;
+    grid-template-rows: 24px minmax(0, 1fr) 28px;
+    gap: 6px;
   }
 
   .pane-head {
-    min-height: 36px;
+    min-height: 24px;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -664,35 +697,49 @@
     font-weight: 700;
   }
 
-  .pane-head div,
+  .pane-actions,
   .actions,
   .inline {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     align-items: center;
   }
 
-  .model-note {
-    margin: 0 18px 12px;
-    display: grid;
-    gap: 3px;
-    color: #4d5b62;
-    font-size: 13px;
+  .pane-actions {
+    justify-content: flex-start;
   }
 
-  .model-note small {
-    color: #69777f;
+  .pane-actions.end {
+    justify-content: flex-end;
+  }
+
+  .model-note {
+    margin: 0 12px 8px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    color: #4d5b62;
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+
+  .model-note span {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .settings-grid {
-    padding: 18px;
+    min-height: 0;
+    padding: 12px;
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 16px;
+    gap: 12px;
+    overflow: auto;
   }
 
   .group {
-    padding: 14px;
+    padding: 12px;
     display: grid;
     gap: 12px;
     border: 1px solid #d6dce0;
@@ -750,9 +797,12 @@
   }
 
   .history-list {
-    padding: 18px;
+    min-height: 0;
+    padding: 12px;
     display: grid;
     gap: 12px;
+    align-content: start;
+    overflow: auto;
   }
 
   .history-head {
@@ -817,27 +867,30 @@
       min-width: 0;
     }
 
-    .topbar,
+    .shell,
     .toolbar,
     .translate-grid,
     .settings-grid {
       grid-template-columns: 1fr;
     }
 
-    .topbar {
-      height: auto;
-      padding: 12px;
-      display: grid;
-      gap: 10px;
+    .shell {
+      grid-template-rows: 40px minmax(0, 1fr);
+    }
+
+    .rail {
+      grid-template-columns: 32px 1fr;
+      grid-template-rows: 1fr;
+      border-right: 0;
+      border-bottom: 1px solid #d6dce0;
     }
 
     nav {
-      overflow-x: auto;
+      display: flex;
     }
 
     textarea {
-      height: 220px;
-      min-height: 220px;
+      min-height: 140px;
     }
   }
 </style>
