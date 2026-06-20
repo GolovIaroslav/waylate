@@ -13,7 +13,8 @@ pub struct ModelProfile {
     pub name: String,
     pub provider: ProviderKind,
     pub description: String,
-    pub license: String,
+    pub quantization: String,
+    pub size: String,
     pub homepage: String,
     pub engine_hint: String,
     pub default_endpoint: Option<String>,
@@ -36,37 +37,68 @@ pub enum ProviderKind {
 pub fn catalog() -> Vec<ModelProfile> {
     vec![
         ModelProfile {
-            id: "hy-mt-gguf".into(),
-            name: "Tencent Hy-MT GGUF".into(),
-            provider: ProviderKind::OpenAiCompatible,
-            description: "Quality-focused local MT model through llama.cpp or another OpenAI-compatible local server.".into(),
-            license: "Check the selected Hugging Face repository before downloading.".into(),
-            homepage: "https://huggingface.co/models?search=Hy-MT%20GGUF".into(),
-            engine_hint: "Start llama.cpp server with a Hy-MT GGUF model, then keep the endpoint at http://127.0.0.1:8080/v1/chat/completions.".into(),
-            default_endpoint: Some("http://127.0.0.1:8080/v1/chat/completions".into()),
-            hf_repo: None,
-            languages: popular_languages(),
-            downloadable: false,
-        },
-        ModelProfile {
             id: "nllb-200-ct2".into(),
-            name: "Meta NLLB-200 CTranslate2".into(),
+            name: "NLLB-200 small".into(),
             provider: ProviderKind::CTranslate2,
-            description: "One-click local profile for a converted NLLB CTranslate2 model.".into(),
-            license: "CC-BY-NC 4.0 for Meta NLLB checkpoints; research/non-commercial constraints apply.".into(),
+            description: "Best first choice. Downloads once and works offline.".into(),
+            quantization: "Balanced".into(),
+            size: "~2.4 GB".into(),
             homepage: "https://huggingface.co/entai2965/nllb-200-distilled-600M-ctranslate2".into(),
-            engine_hint: "Download from Settings. Waylate will save the model path automatically, then call waylate-ct2-translate with CTranslate2.".into(),
+            engine_hint: "Waylate downloads this model and configures local translation automatically.".into(),
             default_endpoint: None,
             hf_repo: Some("entai2965/nllb-200-distilled-600M-ctranslate2".into()),
             languages: nllb_languages(),
             downloadable: true,
         },
         ModelProfile {
+            id: "nllb-200-1-3b-ct2".into(),
+            name: "NLLB-200 medium".into(),
+            provider: ProviderKind::CTranslate2,
+            description: "Better quality, slower and heavier.".into(),
+            quantization: "Balanced".into(),
+            size: "~5.5 GB".into(),
+            homepage: "https://huggingface.co/entai2965/nllb-200-distilled-1.3B-ctranslate2".into(),
+            engine_hint: "Waylate downloads this model and configures local translation automatically.".into(),
+            default_endpoint: None,
+            hf_repo: Some("entai2965/nllb-200-distilled-1.3B-ctranslate2".into()),
+            languages: nllb_languages(),
+            downloadable: true,
+        },
+        ModelProfile {
+            id: "nllb-200-3-3b-ct2".into(),
+            name: "NLLB-200 large".into(),
+            provider: ProviderKind::CTranslate2,
+            description: "Highest quality option. Needs much more disk and memory.".into(),
+            quantization: "Balanced".into(),
+            size: "~13 GB".into(),
+            homepage: "https://huggingface.co/entai2965/nllb-200-3.3B-ctranslate2".into(),
+            engine_hint: "Waylate downloads this model and configures local translation automatically.".into(),
+            default_endpoint: None,
+            hf_repo: Some("entai2965/nllb-200-3.3B-ctranslate2".into()),
+            languages: nllb_languages(),
+            downloadable: true,
+        },
+        ModelProfile {
+            id: "tencent-hy-mt2-1-25bit-gguf".into(),
+            name: "Tencent Hy-MT2 1.8B".into(),
+            provider: ProviderKind::OpenAiCompatible,
+            description: "Advanced custom model. Needs a built-in runner before it can be one-click.".into(),
+            quantization: "1.25-bit GGUF".into(),
+            size: "~440 MB".into(),
+            homepage: "https://huggingface.co/tencent/Hy-MT2-1.8B-1.25Bit-GGUF".into(),
+            engine_hint: "Advanced only until Waylate bundles a GGUF runner.".into(),
+            default_endpoint: Some("http://127.0.0.1:8080/v1/chat/completions".into()),
+            hf_repo: Some("tencent/Hy-MT2-1.8B-1.25Bit-GGUF".into()),
+            languages: tencent_languages(),
+            downloadable: false,
+        },
+        ModelProfile {
             id: "deepl-api".into(),
             name: "DeepL API".into(),
             provider: ProviderKind::DeepL,
             description: "Network translation provider. Disabled by default; needs your own API key.".into(),
-            license: "DeepL API terms".into(),
+            quantization: "Cloud API".into(),
+            size: "remote".into(),
             homepage: "https://www.deepl.com/docs-api".into(),
             engine_hint: "Save a DeepL API key in settings. Text is sent to DeepL only when this profile is selected.".into(),
             default_endpoint: Some("https://api-free.deepl.com/v2/translate".into()),
@@ -79,7 +111,8 @@ pub fn catalog() -> Vec<ModelProfile> {
             name: "Google Cloud Translate".into(),
             provider: ProviderKind::Google,
             description: "Network translation provider. Disabled by default; needs your own API key.".into(),
-            license: "Google Cloud terms".into(),
+            quantization: "Cloud API".into(),
+            size: "remote".into(),
             homepage: "https://cloud.google.com/translate/docs".into(),
             engine_hint: "Save a Google Cloud Translation API key in settings. Text is sent to Google only when this profile is selected.".into(),
             default_endpoint: Some("https://translation.googleapis.com/language/translate/v2".into()),
@@ -92,7 +125,8 @@ pub fn catalog() -> Vec<ModelProfile> {
             name: "Yandex Cloud Translate".into(),
             provider: ProviderKind::Yandex,
             description: "Network translation provider. Disabled by default; needs your own API key and folder ID.".into(),
-            license: "Yandex Cloud terms".into(),
+            quantization: "Cloud API".into(),
+            size: "remote".into(),
             homepage: "https://aistudio.yandex.ru/docs/en/translate/operations/translate".into(),
             engine_hint: "Save a Yandex Cloud API key and Folder ID in Settings. Text is sent to Yandex only when this profile is selected.".into(),
             default_endpoint: Some("https://translate.api.cloud.yandex.net/translate/v2/translate".into()),
@@ -105,7 +139,8 @@ pub fn catalog() -> Vec<ModelProfile> {
             name: "Custom local model".into(),
             provider: ProviderKind::Custom,
             description: "Manual profile for an already installed local translator or OpenAI-compatible endpoint.".into(),
-            license: "User supplied".into(),
+            quantization: "User supplied".into(),
+            size: "custom".into(),
             homepage: "".into(),
             engine_hint: "Use this when you already run a local translation server and want Waylate to send prompts to it.".into(),
             default_endpoint: Some("http://127.0.0.1:8080/v1/chat/completions".into()),
@@ -134,6 +169,34 @@ fn popular_languages() -> Vec<Language> {
         ("zh", "Chinese"),
         ("ja", "Japanese"),
         ("ko", "Korean"),
+    ]
+    .into_iter()
+    .map(lang)
+    .collect()
+}
+
+fn tencent_languages() -> Vec<Language> {
+    [
+        ("auto", "Auto detect"),
+        ("en", "English"),
+        ("ru", "Russian"),
+        ("sk", "Slovak"),
+        ("cs", "Czech"),
+        ("de", "German"),
+        ("uk", "Ukrainian"),
+        ("pl", "Polish"),
+        ("fr", "French"),
+        ("es", "Spanish"),
+        ("it", "Italian"),
+        ("pt", "Portuguese"),
+        ("tr", "Turkish"),
+        ("zh", "Chinese"),
+        ("ja", "Japanese"),
+        ("ko", "Korean"),
+        ("ar", "Arabic"),
+        ("th", "Thai"),
+        ("vi", "Vietnamese"),
+        ("hi", "Hindi"),
     ]
     .into_iter()
     .map(lang)
@@ -178,7 +241,7 @@ mod tests {
     #[test]
     fn catalog_contains_local_profiles_first() {
         let catalog = catalog();
-        assert_eq!(catalog[0].id, "hy-mt-gguf");
+        assert_eq!(catalog[0].id, "nllb-200-ct2");
         assert!(catalog.iter().any(|profile| profile.id == "nllb-200-ct2"));
         assert!(catalog.iter().any(|profile| profile.id == "custom-local"));
     }

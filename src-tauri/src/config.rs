@@ -21,6 +21,7 @@ pub struct AppConfig {
     pub api_provider_enabled: bool,
     pub yandex_folder_id: String,
     pub ui_language: String,
+    pub theme: String,
 }
 
 impl Default for AppConfig {
@@ -41,6 +42,7 @@ impl Default for AppConfig {
             api_provider_enabled: false,
             yandex_folder_id: String::new(),
             ui_language: "en".into(),
+            theme: "light".into(),
         }
     }
 }
