@@ -11,9 +11,16 @@ pub struct AppConfig {
     pub target_lang: String,
     pub history_enabled: bool,
     pub autostart: bool,
+    pub local_model_policy: String,
+    pub local_model_idle_timeout_secs: u64,
     pub openai_endpoint: String,
     pub openai_model: String,
+    pub custom_backend_mode: String,
     pub custom_model_path: String,
+    pub local_llama_server_path: String,
+    pub local_prompt_style: String,
+    pub local_prompt_template: String,
+    pub local_context_size: u32,
     pub ct2_model_path: String,
     pub ct2_tokenizer_path: String,
     pub ct2_helper_command: String,
@@ -32,9 +39,16 @@ impl Default for AppConfig {
             target_lang: "eng_Latn".into(),
             history_enabled: false,
             autostart: true,
+            local_model_policy: "balanced".into(),
+            local_model_idle_timeout_secs: 600,
             openai_endpoint: "http://127.0.0.1:8080/v1/chat/completions".into(),
             openai_model: "local-translation-model".into(),
+            custom_backend_mode: "external-openai".into(),
             custom_model_path: String::new(),
+            local_llama_server_path: String::new(),
+            local_prompt_style: "chat".into(),
+            local_prompt_template: "Translate the following text from {source} to {target}. Return only the translation.\n\n{text}".into(),
+            local_context_size: 4096,
             ct2_model_path: String::new(),
             ct2_tokenizer_path: String::new(),
             ct2_helper_command: "waylate-ct2-translate".into(),
@@ -116,6 +130,10 @@ mod tests {
         assert_eq!(config.target_lang, "eng_Latn");
         assert!(!config.history_enabled);
         assert!(!config.api_provider_enabled);
+        assert_eq!(config.local_model_policy, "balanced");
+        assert_eq!(config.local_model_idle_timeout_secs, 600);
+        assert_eq!(config.custom_backend_mode, "external-openai");
+        assert_eq!(config.local_context_size, 4096);
         assert_eq!(config.ct2_helper_command, "waylate-ct2-translate");
     }
 
@@ -125,6 +143,8 @@ mod tests {
         let config: AppConfig = serde_json::from_str(raw).expect("partial config should load");
         assert_eq!(config.target_lang, "ru");
         assert_eq!(config.openai_endpoint, AppConfig::default().openai_endpoint);
+        assert_eq!(config.local_model_policy, "balanced");
+        assert_eq!(config.custom_backend_mode, "external-openai");
         assert_eq!(config.ct2_helper_command, "waylate-ct2-translate");
     }
 }

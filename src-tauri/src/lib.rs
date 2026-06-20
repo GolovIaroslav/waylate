@@ -3,26 +3,29 @@ mod clipboard;
 mod config;
 mod history;
 mod models;
+mod runtime;
 mod secrets;
 mod translation;
 
 use chrono::Utc;
 use config::{AppConfig, AppPaths};
 use models::{ModelProfile, ProviderKind};
+use runtime::{RuntimeManager, RuntimeReport};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    fs::{self, File},
+    fs::File,
     io::{Read, Write},
-    os::unix::fs::PermissionsExt,
     path::Path,
     process::Command,
-    sync::Mutex,
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
 };
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use translation::{TranslationRequest, TranslationResponse};
 
@@ -30,6 +33,7 @@ struct AppState {
     paths: AppPaths,
     pending: Mutex<Option<PendingRequest>>,
     download: Mutex<DownloadControl>,
+    runtime: Arc<RuntimeManager>,
 }
 
 #[derive(Debug, Default)]
@@ -46,13 +50,14 @@ struct PendingRequest {
     notice: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppSnapshot {
     config: AppConfig,
     catalog: Vec<ModelProfile>,
     history: Vec<history::HistoryEntry>,
     environment: EnvironmentReport,
+    runtime: RuntimeReport,
     has_deepl_key: bool,
     has_google_key: bool,
     has_yandex_key: bool,
@@ -66,10 +71,12 @@ struct EnvironmentReport {
     desktop: String,
     session_type: String,
     has_wl_clipboard: bool,
-    has_huggingface_cli: bool,
     has_python: bool,
     has_nvidia_smi: bool,
     has_rocm_smi: bool,
+    has_llama_server: bool,
+    ct2_cuda_devices: u32,
+    llama_cuda_reported: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,10 +114,11 @@ fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
         Vec::new()
     };
     Ok(AppSnapshot {
-        config,
+        config: config.clone(),
         catalog: models::catalog(),
         history: entries,
-        environment: environment_report(),
+        environment: environment_report(&state.paths, &config),
+        runtime: state.runtime.report(&state.paths, &config),
         has_deepl_key: secrets::has("deepl"),
         has_google_key: secrets::has("google"),
         has_yandex_key: secrets::has("yandex"),
@@ -128,6 +136,10 @@ fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
 fn save_config(state: State<'_, AppState>, next: AppConfig) -> Result<AppConfig, String> {
     config::save(&state.paths, &next)?;
     autostart::sync(&state.paths, next.autostart)?;
+    state.runtime.cleanup_idle(&next);
+    if next.local_model_policy == "fast" {
+        state.runtime.maybe_preload(&state.paths, &next);
+    }
     Ok(next)
 }
 
@@ -137,7 +149,10 @@ fn translate_text(
     request: TranslationRequest,
 ) -> Result<TranslationResponse, String> {
     let config = config::load(&state.paths)?;
-    let response = translation::translate(&config, &request)?;
+    let response = translation::translate(&state.paths, &state.runtime, &config, &request)?;
+    state
+        .runtime
+        .apply_post_translate_policy(&config, &request.model_id);
     if config.history_enabled {
         history::insert(
             &state.paths.history_db,
@@ -230,8 +245,9 @@ async fn download_catalog_model(app: AppHandle, state: State<'_, AppState>, mode
 
     let paths = state.paths.clone();
     let app_for_download = app.clone();
+    let runtime = state.runtime.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        download_huggingface_repo(&app_for_download, &paths, &profile, &repo)
+        download_huggingface_repo(&app_for_download, &paths, &runtime, &profile, &repo)
     })
     .await
     .map_err(|err| err.to_string())?;
@@ -248,6 +264,7 @@ async fn download_catalog_model(app: AppHandle, state: State<'_, AppState>, mode
 fn download_huggingface_repo(
     app: &AppHandle,
     paths: &AppPaths,
+    runtime: &Arc<RuntimeManager>,
     profile: &ModelProfile,
     repo: &str,
 ) -> Result<String, String> {
@@ -360,13 +377,15 @@ fn download_huggingface_repo(
                 downloaded,
                 total,
             );
-            let helper = ensure_ct2_runtime(paths)?;
+            let helper = runtime::ensure_ct2_runtime(paths)?;
             config.ct2_model_path = target.display().to_string();
             config.ct2_tokenizer_path = target.display().to_string();
             config.source_lang = "auto".into();
             config.target_lang = "eng_Latn".into();
             config.ct2_helper_command = helper;
-            config.ct2_device = "cpu".into();
+            if config.ct2_device.trim().is_empty() {
+                config.ct2_device = "auto".into();
+            }
         }
         ProviderKind::OpenAiCompatible => {
             if let Some(endpoint) = &profile.default_endpoint {
@@ -378,65 +397,21 @@ fn download_huggingface_repo(
         _ => {}
     }
     config::save(paths, &config)?;
+    if config.local_model_policy == "fast" && profile.provider == ProviderKind::CTranslate2 {
+        emit_download(
+            app,
+            &profile.id,
+            "preparing",
+            "Loading model into memory",
+            0.99,
+            downloaded,
+            total,
+        );
+        let _ = runtime.ensure_ct2_server(paths, &config, &profile.id);
+    }
 
     emit_download(app, &profile.id, "done", "Ready", 1.0, downloaded, total);
     Ok(target.display().to_string())
-}
-
-fn ensure_ct2_runtime(paths: &AppPaths) -> Result<String, String> {
-    let runtime_dir = paths.data_dir.join("runtime");
-    let bin_dir = runtime_dir.join("bin");
-    let python = bin_dir.join("python");
-    let helper = runtime_dir.join("waylate-ct2-translate");
-    if !python.exists() {
-        fs::create_dir_all(&runtime_dir).map_err(|err| err.to_string())?;
-        let output = Command::new("python3")
-            .arg("-m")
-            .arg("venv")
-            .arg(&runtime_dir)
-            .output()
-            .map_err(|err| format!("Could not create local Python runtime: {err}"))?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-        }
-    }
-
-    let deps_ok = Command::new(&python)
-        .arg("-c")
-        .arg("import ctranslate2, transformers, sentencepiece")
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !deps_ok {
-        let output = Command::new(&python)
-            .arg("-m")
-            .arg("pip")
-            .arg("install")
-            .arg("--upgrade")
-            .arg("ctranslate2")
-            .arg("transformers")
-            .arg("sentencepiece")
-            .output()
-            .map_err(|err| format!("Could not install local translation runtime: {err}"))?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-        }
-    }
-
-    let source = include_str!("../../scripts/waylate-ct2-translate");
-    let body = source
-        .lines()
-        .skip(1)
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(&helper, format!("#!{}\n{body}\n", python.display()))
-        .map_err(|err| format!("Could not write helper: {err}"))?;
-    let mut permissions = fs::metadata(&helper)
-        .map_err(|err| err.to_string())?
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&helper, permissions).map_err(|err| err.to_string())?;
-    Ok(helper.display().to_string())
 }
 
 fn huggingface_files(client: &reqwest::blocking::Client, repo: &str) -> Result<Vec<HfFile>, String> {
@@ -640,7 +615,11 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     },
                 );
             }
-            "quit" => app.exit(0),
+            "quit" => {
+                let state = app.state::<AppState>();
+                let _ = state.runtime.shutdown_all();
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -666,15 +645,18 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn environment_report() -> EnvironmentReport {
+fn environment_report(paths: &AppPaths, config: &AppConfig) -> EnvironmentReport {
+    let runtime_report = RuntimeManager::new().report(paths, config);
     EnvironmentReport {
         desktop: std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
         session_type: std::env::var("XDG_SESSION_TYPE").unwrap_or_default(),
         has_wl_clipboard: has_command("wl-paste") && has_command("wl-copy"),
-        has_huggingface_cli: has_command("huggingface-cli"),
         has_python: has_command("python3"),
         has_nvidia_smi: has_command("nvidia-smi"),
         has_rocm_smi: has_command("rocm-smi"),
+        has_llama_server: runtime_report.llama_binary_found,
+        ct2_cuda_devices: runtime_report.ct2_cuda_devices,
+        llama_cuda_reported: runtime_report.llama_cuda_reported,
     }
 }
 
@@ -687,6 +669,16 @@ fn has_command(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn spawn_runtime_housekeeper(paths: AppPaths, runtime: Arc<RuntimeManager>) {
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(5));
+        if let Ok(config) = config::load(&paths) {
+            runtime.cleanup_idle(&config);
+            runtime.maybe_preload(&paths, &config);
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -694,17 +686,31 @@ pub fn run() {
             handle_args(app, &args);
         }))
         .plugin(tauri_plugin_opener::init())
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             let paths = AppPaths::new().map_err(|err| Box::<dyn std::error::Error>::from(err))?;
             paths.ensure().map_err(|err| Box::<dyn std::error::Error>::from(err))?;
             history::init(&paths.history_db).map_err(|err| Box::<dyn std::error::Error>::from(err))?;
+            let runtime = Arc::new(RuntimeManager::new());
             if let Ok(config) = config::load(&paths) {
                 let _ = autostart::sync(&paths, config.autostart);
+                if config.local_model_policy == "fast" {
+                    runtime.maybe_preload(&paths, &config);
+                }
             }
+            spawn_runtime_housekeeper(paths.clone(), runtime.clone());
             app.manage(AppState {
                 paths,
                 pending: Mutex::new(None),
                 download: Mutex::new(DownloadControl::default()),
+                runtime,
             });
             setup_tray(app)?;
             let args: Vec<String> = std::env::args().collect();

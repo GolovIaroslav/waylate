@@ -1,12 +1,12 @@
 use crate::{
-    config::AppConfig,
+    config::{AppConfig, AppPaths},
     models::{catalog, ProviderKind},
+    runtime::{self, RuntimeManager},
     secrets,
 };
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,7 +25,12 @@ pub struct TranslationResponse {
     pub warning: Option<String>,
 }
 
-pub fn translate(config: &AppConfig, request: &TranslationRequest) -> Result<TranslationResponse, String> {
+pub fn translate(
+    paths: &AppPaths,
+    runtime_manager: &RuntimeManager,
+    config: &AppConfig,
+    request: &TranslationRequest,
+) -> Result<TranslationResponse, String> {
     if request.text.trim().is_empty() {
         return Err("Nothing to translate".into());
     }
@@ -36,8 +41,9 @@ pub fn translate(config: &AppConfig, request: &TranslationRequest) -> Result<Tra
         .ok_or_else(|| format!("Unknown model profile: {}", request.model_id))?;
 
     match profile.provider {
-        ProviderKind::OpenAiCompatible | ProviderKind::Custom => translate_openai_compatible(config, request),
-        ProviderKind::CTranslate2 => translate_ctranslate2(config, request),
+        ProviderKind::OpenAiCompatible => translate_openai_compatible(config, request),
+        ProviderKind::Custom => translate_custom_local(paths, runtime_manager, config, request),
+        ProviderKind::CTranslate2 => translate_ctranslate2(paths, runtime_manager, config, request),
         ProviderKind::DeepL => translate_deepl(config, request),
         ProviderKind::Google => translate_google(config, request),
         ProviderKind::Yandex => translate_yandex(config, request),
@@ -90,47 +96,58 @@ fn translate_openai_compatible(config: &AppConfig, request: &TranslationRequest)
     })
 }
 
-fn translate_ctranslate2(config: &AppConfig, request: &TranslationRequest) -> Result<TranslationResponse, String> {
-    if config.ct2_model_path.trim().is_empty() {
-        return Err("NLLB/CTranslate2 profile needs a converted model directory in Settings.".into());
-    }
-    if config.ct2_tokenizer_path.trim().is_empty() {
-        return Err("NLLB/CTranslate2 profile needs a tokenizer path or Hugging Face tokenizer id in Settings.".into());
-    }
-
-    let helper = if config.ct2_helper_command.trim().is_empty() {
-        "waylate-ct2-translate"
-    } else {
-        config.ct2_helper_command.trim()
-    };
-
-    let output = Command::new(helper)
-        .arg("--model")
-        .arg(&config.ct2_model_path)
-        .arg("--tokenizer")
-        .arg(&config.ct2_tokenizer_path)
-        .arg("--device")
-        .arg(&config.ct2_device)
-        .arg("--source")
-        .arg(&request.source_lang)
-        .arg("--target")
-        .arg(&request.target_lang)
-        .arg(&request.text)
-        .output()
-        .map_err(|err| format!("Could not start CTranslate2 helper: {err}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "CTranslate2 helper failed. Install ctranslate2 and transformers for Python.".into()
-        } else {
-            stderr
+fn translate_custom_local(
+    paths: &AppPaths,
+    runtime_manager: &RuntimeManager,
+    config: &AppConfig,
+    request: &TranslationRequest,
+) -> Result<TranslationResponse, String> {
+    if config.custom_backend_mode == "managed-gguf" {
+        let (translated, device) = runtime::translate_via_managed_llama(
+            runtime_manager,
+            paths,
+            config,
+            &request.model_id,
+            &request.source_lang,
+            &request.target_lang,
+            &request.text,
+        )?;
+        return Ok(TranslationResponse {
+            translated_text: translated,
+            provider_label: format!("Managed local GGUF ({device})"),
+            warning: None,
         });
     }
 
+    translate_openai_compatible(config, request)
+}
+
+fn translate_ctranslate2(
+    paths: &AppPaths,
+    runtime_manager: &RuntimeManager,
+    config: &AppConfig,
+    request: &TranslationRequest,
+) -> Result<TranslationResponse, String> {
+    if config.ct2_model_path.trim().is_empty() {
+        return Err("This model is not installed - Download it in Settings.".into());
+    }
+    if config.ct2_tokenizer_path.trim().is_empty() {
+        return Err("This model is not installed - Download it in Settings.".into());
+    }
+
+    let (translated, device) = runtime::translate_via_warm_ct2(
+        runtime_manager,
+        paths,
+        config,
+        &request.model_id,
+        &request.source_lang,
+        &request.target_lang,
+        &request.text,
+    )?;
+
     Ok(TranslationResponse {
-        translated_text: String::from_utf8_lossy(&output.stdout).trim().to_string(),
-        provider_label: "CTranslate2".into(),
+        translated_text: translated,
+        provider_label: format!("Warm local NLLB ({device})"),
         warning: None,
     })
 }
