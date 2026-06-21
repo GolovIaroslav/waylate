@@ -148,8 +148,11 @@ impl RuntimeManager {
         if config.local_model_policy != "fast" {
             return;
         }
-        if config.model_id.starts_with("nllb-200") {
-            let _ = self.ensure_ct2_server(paths, config, &config.model_id);
+        if let Some(profile) = crate::models::catalog()
+            .into_iter()
+            .find(|profile| profile.id == config.model_id && profile.provider == crate::models::ProviderKind::CTranslate2)
+        {
+            let _ = self.ensure_ct2_server(paths, config, &profile.id);
         } else if let Some(profile) = crate::models::catalog()
             .into_iter()
             .find(|profile| profile.id == config.model_id && profile.id != "custom-local" && profile.provider == crate::models::ProviderKind::Custom)

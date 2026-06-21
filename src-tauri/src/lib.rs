@@ -1,6 +1,7 @@
 mod autostart;
 mod clipboard;
 mod config;
+mod engines;
 mod history;
 mod models;
 mod runtime;
@@ -423,20 +424,47 @@ fn download_spec_model_files(
             std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
         }
 
-        let url = format!("https://huggingface.co/{}/resolve/main/{}", file.repo, file.path);
-        let mut response = client
-            .get(url)
-            .send()
-            .map_err(|err| format!("Could not download {}: {err}", file.path))?
-            .error_for_status()
-            .map_err(|err| format!("Hugging Face returned an error for {}: {err}", file.path))?;
         let part_path = local_path.with_extension(format!(
             "{}part",
             local_path.extension().and_then(|value| value.to_str()).map(|value| format!("{value}.")).unwrap_or_default()
         ));
-        let mut output = File::create(&part_path)
+        let mut resume_from = part_path.metadata().map(|metadata| metadata.len()).unwrap_or_default();
+        if resume_from > 0 {
+            downloaded += resume_from;
+            emit_download(
+                app,
+                &profile.id,
+                "downloading",
+                &file.destination,
+                download_ratio(downloaded, total),
+                downloaded,
+                total,
+            );
+        }
+
+        let url = format!("https://huggingface.co/{}/resolve/main/{}", file.repo, file.path);
+        let mut request = client.get(url);
+        if resume_from > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
+        }
+        let mut response = request
+            .send()
+            .map_err(|err| format!("Could not download {}: {err}", file.path))?
+            .error_for_status()
+            .map_err(|err| format!("Hugging Face returned an error for {}: {err}", file.path))?;
+        if resume_from > 0 && response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            downloaded = downloaded.saturating_sub(resume_from);
+            resume_from = 0;
+        }
+        let mut output = std::fs::OpenOptions::new()
+            .create(true)
+            .append(resume_from > 0)
+            .write(true)
+            .truncate(resume_from == 0)
+            .open(&part_path)
             .map_err(|err| format!("Could not create {}: {err}", local_path.display()))?;
         let mut buffer = [0_u8; 128 * 1024];
+        let mut file_downloaded = resume_from;
         loop {
             if is_download_cancelled(app, &profile.id)? {
                 emit_download(app, &profile.id, "cancelled", "Download cancelled", 0.0, downloaded, total);
@@ -451,6 +479,7 @@ fn download_spec_model_files(
             output
                 .write_all(&buffer[..read])
                 .map_err(|err| format!("Could not write {}: {err}", local_path.display()))?;
+            file_downloaded += read as u64;
             downloaded += read as u64;
             emit_download(
                 app,
@@ -461,6 +490,14 @@ fn download_spec_model_files(
                 downloaded,
                 total,
             );
+        }
+        if let Some(expected) = file.size_bytes {
+            if file_downloaded != expected {
+                return Err(format!(
+                    "Downloaded {} bytes for {}, expected {}.",
+                    file_downloaded, file.path, expected
+                ));
+            }
         }
         std::fs::rename(&part_path, &local_path)
             .map_err(|err| format!("Could not finalize {}: {err}", local_path.display()))?;

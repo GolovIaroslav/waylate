@@ -66,6 +66,12 @@
     llmLanguageName?: string;
   };
 
+  type TranslateModel = ModelProfile | ModelCatalogEntry;
+  type UiLanguageOption = {
+    code: string;
+    name: string;
+  };
+
   type ModelFile = {
     repo: string;
     path: string;
@@ -224,7 +230,7 @@
 
   $: selectedModel = modelProfiles.find((model) => model.id === config?.modelId)
     ?? snapshot?.catalog.find((model) => model.id === config?.modelId);
-  $: languages = selectedModel?.languages ?? [];
+  $: languages = normalizedLanguages(selectedModel);
   $: localModelReady = Boolean(selectedModel && (specModelState(selectedModel.id) === "installed" || isModelInstalled(selectedModel.id) || hasInstalledModelFiles()));
   $: curatedModels = modelProfiles;
   $: selectableModels = availableTranslateModels(snapshot, config);
@@ -300,12 +306,12 @@
     kor_Hang: ["korean", "корейский", "korejcina", "kórejčina"],
   };
 
-  const fallbackCatalogLanguages: Language[] = [
-    { code: "auto", name: "Auto detect" },
-    { code: "en", name: "English" },
-    { code: "ru", name: "Russian" },
-    { code: "sk", name: "Slovak" },
-    { code: "de", name: "German" },
+  const fallbackCatalogLanguages: LanguageCode[] = [
+    { uiCode: "auto", label: "Auto detect" },
+    { uiCode: "en", label: "English", nllbCode: "eng_Latn", llmLanguageName: "English" },
+    { uiCode: "ru", label: "Russian", nllbCode: "rus_Cyrl", llmLanguageName: "Russian" },
+    { uiCode: "sk", label: "Slovak", nllbCode: "slk_Latn", llmLanguageName: "Slovak" },
+    { uiCode: "de", label: "German", nllbCode: "deu_Latn", llmLanguageName: "German" },
   ];
 
   const fallbackCatalog: ModelCatalogEntry[] = [
@@ -314,14 +320,14 @@
       name: "NLLB-200 (600M)",
       engine: "onnx-encoder-decoder",
       audience: "beginner",
-      license: "MIT",
-      licenseUrl: "https://huggingface.co/meta-llama/Llama-2-7b/blob/main/LICENSE",
+      license: "CC-BY-NC-4.0",
+      licenseUrl: "https://creativecommons.org/licenses/by-nc/4.0/",
       homepage: "https://huggingface.co/facebook/nllb-200-distilled-600M",
       description: "Recommended first local model. Fast, multilingual, and runs natively on CPU.",
       languages: fallbackCatalogLanguages,
       files: [],
-      promptStyle: null,
-      promptTemplate: null,
+      promptStyle: undefined,
+      promptTemplate: undefined,
       estimatedDownloadBytes: 600 * 1024 * 1024,
       estimatedDiskBytes: 1200 * 1024 * 1024,
       minRamBytes: 2 * 1024 * 1024 * 1024,
@@ -339,10 +345,10 @@
       languages: fallbackCatalogLanguages,
       files: [],
       promptStyle: "chat",
-      promptTemplate: null,
+      promptTemplate: undefined,
       estimatedDownloadBytes: 440 * 1024 * 1024,
       estimatedDiskBytes: 440 * 1024 * 1024,
-      minRamBytes: null,
+      minRamBytes: undefined,
       downloadable: true,
     },
   ];
@@ -990,11 +996,12 @@
       ?? snapshot.catalog.find((model) => model.id === modelId);
     if (!nextModel) return;
     config.modelId = modelId;
-    config.sourceLang = closestLanguage(config.sourceLang, nextModel.languages, true);
-    config.targetLang = closestLanguage(config.targetLang, nextModel.languages, false);
+    const nextLanguages = normalizedLanguages(nextModel);
+    config.sourceLang = closestLanguage(config.sourceLang, nextLanguages, true);
+    config.targetLang = closestLanguage(config.targetLang, nextLanguages, false);
   }
 
-  function closestLanguage(current: string, nextLanguages: Language[], allowAuto: boolean) {
+  function closestLanguage(current: string, nextLanguages: UiLanguageOption[], allowAuto: boolean) {
     const available = new Set(nextLanguages.map((language) => language.code));
     const aliases = languageAliases[current] ?? [current];
     const match = aliases.find((code) => available.has(code));
@@ -1100,7 +1107,7 @@
           text: "Hello",
           sourceLang:
             config.sourceLang === "auto"
-              ? selectedModel?.provider === "c-translate2"
+              ? modelUsesNllbCodes(selectedModel)
                 ? "eng_Latn"
                 : "en"
               : config.sourceLang,
@@ -1157,7 +1164,7 @@
     return displayLanguageName(code, languages);
   }
 
-  function languageSearchText(language: Language) {
+  function languageSearchText(language: UiLanguageOption) {
     return [language.code, language.name, ...(languageSearchAliases[language.code] ?? [])]
       .join(" ")
       .toLocaleLowerCase();
@@ -1169,6 +1176,33 @@
       .filter((language) => includeAuto || language.code !== "auto")
       .filter((language) => !normalized || languageSearchText(language).includes(normalized))
       .slice(0, 36);
+  }
+
+  function normalizedLanguages(model: TranslateModel | undefined | null): UiLanguageOption[] {
+    if (!model) return [];
+    if ("provider" in model) {
+      return model.languages.map((language) => ({ code: language.code, name: language.name }));
+    }
+    const useNllbCodes = modelUsesNllbCodes(model);
+    return model.languages.map((language) => ({
+      code: useNllbCodes ? language.nllbCode ?? language.uiCode : language.uiCode,
+      name: language.label,
+    }));
+  }
+
+  function modelProvider(model: TranslateModel | undefined | null): ProviderKind | null {
+    if (!model) return null;
+    if ("provider" in model) return model.provider;
+    if (model.engine === "onnx-encoder-decoder") return "c-translate2";
+    if (model.engine === "managed-llama-cpp") return "custom";
+    if (model.engine === "open-ai-compatible") return "open-ai-compatible";
+    return null;
+  }
+
+  function modelUsesNllbCodes(model: TranslateModel | undefined | null) {
+    if (!model) return false;
+    if ("provider" in model) return model.provider === "c-translate2";
+    return model.engine === "onnx-encoder-decoder" && model.id.startsWith("nllb-");
   }
 
   function isLocalProfile(modelId: string) {
@@ -1215,13 +1249,16 @@
 
   function hasInstalledModelFiles() {
     if (!selectedModel) return false;
-    if (selectedModel.provider === "c-translate2") {
+    if (!("provider" in selectedModel)) {
+      return specModelState(selectedModel.id) === "installed" || isModelInstalled(selectedModel.id);
+    }
+    if (modelUsesNllbCodes(selectedModel)) {
       return Boolean(config?.ct2ModelPath && config?.ct2TokenizerPath);
     }
-    if (selectedModel.provider === "custom" && selectedModel.id !== "custom-local") {
+    if (modelProvider(selectedModel) === "custom" && selectedModel.id !== "custom-local") {
       return isModelInstalled(selectedModel.id);
     }
-    if (selectedModel.provider === "custom" && config?.customBackendMode === "managed-gguf") {
+    if (modelProvider(selectedModel) === "custom" && config?.customBackendMode === "managed-gguf") {
       return Boolean(config.customModelPath);
     }
     return Boolean(config?.openaiEndpoint);
@@ -1229,17 +1266,20 @@
 
   function hasTokenizerReady() {
     if (!selectedModel) return false;
-    if (selectedModel.provider === "c-translate2") {
+    if (!("provider" in selectedModel)) {
+      return specModelState(selectedModel.id) === "installed" || isModelInstalled(selectedModel.id);
+    }
+    if (modelUsesNllbCodes(selectedModel)) {
       return Boolean(config?.ct2TokenizerPath);
     }
-    if (selectedModel.provider === "custom") {
+    if (modelProvider(selectedModel) === "custom") {
       return hasInstalledModelFiles();
     }
     return false;
   }
 
   function needsPythonRuntime() {
-    return selectedModel?.provider === "c-translate2";
+    return Boolean(selectedModel && "provider" in selectedModel && modelUsesNllbCodes(selectedModel));
   }
 
   function modelReadinessSummary() {
@@ -1417,7 +1457,13 @@
     return message;
   }
 
-  function displayLanguageName(code: string, languageList: Language[] = snapshot?.catalog.flatMap((item) => item.languages) ?? []) {
+  function displayLanguageName(
+    code: string,
+    languageList: UiLanguageOption[] = [
+      ...(snapshot?.catalog.flatMap((item) => normalizedLanguages(item)) ?? []),
+      ...modelProfiles.flatMap((item) => normalizedLanguages(item)),
+    ],
+  ) {
     return languageList.find((language) => language.code === code)?.name ?? code;
   }
 

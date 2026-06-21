@@ -71,6 +71,31 @@ pub struct ModelCatalogEntry {
     pub downloadable: bool,
 }
 
+impl ModelCatalogEntry {
+    pub fn language_codes_for_translate(&self) -> Vec<Language> {
+        let wants_nllb = self.engine == EngineKind::OnnxEncoderDecoder && self.id.starts_with("nllb-");
+        let mut languages = vec![Language {
+            code: "auto".into(),
+            name: "Auto detect".into(),
+        }];
+        languages.extend(self.languages.iter().filter_map(|language| {
+            let code = if wants_nllb {
+                language.nllb_code.as_deref().unwrap_or(language.ui_code.as_str())
+            } else {
+                language.ui_code.as_str()
+            };
+            if code == "auto" {
+                return None;
+            }
+            Some(Language {
+                code: code.to_string(),
+                name: language.label.clone(),
+            })
+        }));
+        languages
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum InstallState {
@@ -121,6 +146,53 @@ pub enum ProviderKind {
     Custom,
 }
 
+impl From<ModelCatalogEntry> for ModelProfile {
+    fn from(entry: ModelCatalogEntry) -> Self {
+        let languages = entry.language_codes_for_translate();
+        let quantization = match entry.id.as_str() {
+            "nllb-200-distilled-600m-onnx" => "INT8 ONNX",
+            "opus-mt-marian-onnx" => "Pair-specific ONNX",
+            "tencent-hy-mt2-1.8b-gguf" => "1.25-bit GGUF",
+            "translategemma-4b-gguf" => "Q4_K_M GGUF",
+            "milmmt-46-1b-gguf" => "GGUF prep pending",
+            _ => "Built-in",
+        };
+        let size = human_size(entry.estimated_download_bytes);
+        let engine_hint = match entry.engine {
+            EngineKind::OnnxEncoderDecoder => "Built-in ONNX engine managed by Waylate.".to_string(),
+            EngineKind::ManagedLlamaCpp => "Waylate manages llama-server automatically for this model.".to_string(),
+            EngineKind::OpenAiCompatible => "Uses an external OpenAI-compatible endpoint.".to_string(),
+            EngineKind::NetworkApi => "Uses a network translation API.".to_string(),
+        };
+        let provider = match entry.engine {
+            EngineKind::OnnxEncoderDecoder => ProviderKind::CTranslate2,
+            EngineKind::ManagedLlamaCpp => ProviderKind::Custom,
+            EngineKind::OpenAiCompatible => ProviderKind::OpenAiCompatible,
+            EngineKind::NetworkApi => ProviderKind::Custom,
+        };
+
+        Self {
+            id: entry.id,
+            name: entry.name,
+            provider,
+            description: entry.description,
+            quantization: quantization.into(),
+            size,
+            homepage: entry.homepage,
+            engine_hint,
+            default_endpoint: None,
+            hf_repo: None,
+            download_filenames: entry.files.iter().map(|file| file.destination.clone()).collect(),
+            managed_prompt_style: entry.prompt_style.map(prompt_style_key),
+            managed_prompt_template: entry.prompt_template,
+            managed_context_size: Some(4096),
+            install_check_files: entry.files.iter().map(|file| file.destination.clone()).collect(),
+            languages,
+            downloadable: entry.downloadable,
+        }
+    }
+}
+
 pub fn model_catalog() -> Vec<ModelCatalogEntry> {
     let languages = language_codes();
     vec![
@@ -135,20 +207,27 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
             description: "Recommended broad-coverage local model. Downloads once and then works offline.".into(),
             languages: languages.clone(),
             files: vec![
-                model_file("niedev/nllb-200-distilled-600M-onnx", "encoder_model.onnx", "encoder_model.onnx"),
                 model_file(
-                    "niedev/nllb-200-distilled-600M-onnx",
-                    "decoder_model_merged.onnx",
-                    "decoder_model_merged.onnx",
-                ),
-                model_file("niedev/nllb-200-distilled-600M-onnx", "tokenizer.json", "tokenizer.json"),
+                    "Xenova/nllb-200-distilled-600M",
+                    "onnx/encoder_model_quantized.onnx",
+                    "encoder_model_quantized.onnx",
+                )
+                .with_size(419_120_483),
+                model_file(
+                    "Xenova/nllb-200-distilled-600M",
+                    "onnx/decoder_model_merged_quantized.onnx",
+                    "decoder_model_merged_quantized.onnx",
+                )
+                .with_size(475_505_771),
+                model_file("Xenova/nllb-200-distilled-600M", "tokenizer.json", "tokenizer.json")
+                    .with_size(17_331_224),
             ],
             prompt_style: None,
             prompt_template: None,
-            estimated_download_bytes: 600 * 1024 * 1024,
-            estimated_disk_bytes: 700 * 1024 * 1024,
+            estimated_download_bytes: 911_957_478,
+            estimated_disk_bytes: 911_957_478,
             min_ram_bytes: Some(2 * 1024 * 1024 * 1024),
-            downloadable: false,
+            downloadable: true,
         },
         ModelCatalogEntry {
             id: "opus-mt-marian-onnx".into(),
@@ -206,12 +285,11 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
                 "translategemma-4b-it-Q4_K_M.gguf",
             )],
             prompt_style: Some(PromptStyle::Chat),
-            // TODO: pull the exact chat template from the model card before enabling.
-            prompt_template: None,
+            prompt_template: Some("Translate this from {source} to {target}. Return only the translation.\n\n{text}".into()),
             estimated_download_bytes: 3 * 1024 * 1024 * 1024,
             estimated_disk_bytes: 3 * 1024 * 1024 * 1024,
             min_ram_bytes: Some(8 * 1024 * 1024 * 1024),
-            downloadable: true,
+            downloadable: false,
         },
         ModelCatalogEntry {
             id: "milmmt-46-1b-gguf".into(),
@@ -465,6 +543,7 @@ fn popular_languages() -> Vec<Language> {
 
 fn language_codes() -> Vec<LanguageCode> {
     [
+        ("auto", "Auto detect", None, None),
         ("en", "English", Some("eng_Latn"), Some("English")),
         ("ru", "Russian", Some("rus_Cyrl"), Some("Russian")),
         ("sk", "Slovak", Some("slk_Latn"), Some("Slovak")),
@@ -499,6 +578,30 @@ fn model_file(repo: &str, path: &str, destination: &str) -> ModelFile {
         sha256: None,
         size_bytes: None,
         destination: destination.into(),
+    }
+}
+
+impl ModelFile {
+    fn with_size(mut self, size_bytes: u64) -> Self {
+        self.size_bytes = Some(size_bytes);
+        self
+    }
+}
+
+fn prompt_style_key(style: PromptStyle) -> String {
+    match style {
+        PromptStyle::Chat => "chat".into(),
+        PromptStyle::Completion => "completion".into(),
+    }
+}
+
+fn human_size(bytes: u64) -> String {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    if bytes >= GIB {
+        format!("~{:.1} GB", bytes as f64 / GIB as f64)
+    } else {
+        format!("~{} MB", (bytes / MIB).max(1))
     }
 }
 

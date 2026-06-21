@@ -41,9 +41,18 @@ pub fn translate(
         .find(|item| item.id == request.model_id)
     {
         return match entry.engine {
-            EngineKind::OnnxEncoderDecoder => Err(
-                "ONNX engine is not yet implemented. Download a GGUF model or wait for the next update.".into(),
-            ),
+            EngineKind::OnnxEncoderDecoder => crate::engines::onnx_mt::translate(
+                paths,
+                &entry,
+                &request.text,
+                &request.source_lang,
+                &request.target_lang,
+            )
+            .map(|translated_text| TranslationResponse {
+                translated_text,
+                provider_label: "Local ONNX translation".into(),
+                warning: None,
+            }),
             EngineKind::ManagedLlamaCpp => {
                 translate_spec_managed_llama(paths, runtime_manager, config, request, &entry)
             }

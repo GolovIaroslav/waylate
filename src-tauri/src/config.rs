@@ -34,7 +34,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            model_id: "nllb-200-ct2".into(),
+            model_id: "nllb-200-distilled-600m-onnx".into(),
             source_lang: "auto".into(),
             target_lang: "eng_Latn".into(),
             history_enabled: false,
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn config_defaults_keep_history_and_api_off() {
         let config = AppConfig::default();
-        assert_eq!(config.model_id, "nllb-200-ct2");
+        assert_eq!(config.model_id, "nllb-200-distilled-600m-onnx");
         assert_eq!(config.target_lang, "eng_Latn");
         assert!(!config.history_enabled);
         assert!(!config.api_provider_enabled);
