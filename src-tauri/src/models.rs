@@ -212,15 +212,18 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
                     "onnx/encoder_model_quantized.onnx",
                     "encoder_model_quantized.onnx",
                 )
-                .with_size(419_120_483),
+                .with_size(419_120_483)
+                .with_sha256("2d291e975e27a76ab0a786e49148ca46b8177ffee21429941309f92016c300e3"),
                 model_file(
                     "Xenova/nllb-200-distilled-600M",
                     "onnx/decoder_model_merged_quantized.onnx",
                     "decoder_model_merged_quantized.onnx",
                 )
-                .with_size(475_505_771),
+                .with_size(475_505_771)
+                .with_sha256("3656bd87027534fc2a906966c02ab6fd08ba3d9b75cf87b18d1bb77d22799a54"),
                 model_file("Xenova/nllb-200-distilled-600M", "tokenizer.json", "tokenizer.json")
-                    .with_size(17_331_224),
+                    .with_size(17_331_224)
+                    .with_sha256("18761a875b5fe0e2091fe1af33c9d084902f95f0a38d4cdb1d2fa411850a95dd"),
             ],
             prompt_style: None,
             prompt_template: None,
@@ -258,14 +261,16 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
             description: "Compact high-quality local GGUF translation model.".into(),
             languages: languages.clone(),
             files: vec![model_file(
-                "tencent/Hy-MT2-1.8B-1.25Bit-GGUF",
-                "Hy-MT2-1.8B-1.25Bit.gguf",
-                "Hy-MT2-1.8B-1.25Bit.gguf",
-            )],
+                "tencent/Hy-MT2-1.8B-GGUF",
+                "Hy-MT2-1.8B-Q4_K_M.gguf",
+                "Hy-MT2-1.8B-Q4_K_M.gguf",
+            )
+            .with_size(1_133_080_448)
+            .with_sha256("a7725d3b0b25dd12b87709a4ef9a4faa70e80d23de3d190661f3d01439b11e0c")],
             prompt_style: Some(PromptStyle::Chat),
             prompt_template: Some("Translate the following text from {source} to {target}. Return only the translation.\n\n{text}".into()),
-            estimated_download_bytes: 440 * 1024 * 1024,
-            estimated_disk_bytes: 480 * 1024 * 1024,
+            estimated_download_bytes: 1_133_080_448,
+            estimated_disk_bytes: 1_133_080_448,
             min_ram_bytes: Some(4 * 1024 * 1024 * 1024),
             downloadable: true,
         },
@@ -283,7 +288,9 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
                 "bullerwins/translategemma-4b-it-GGUF",
                 "translategemma-4b-it-Q4_K_M.gguf",
                 "translategemma-4b-it-Q4_K_M.gguf",
-            )],
+            )
+            .with_size(2_489_909_312)
+            .with_sha256("a1db9212fbef2d3ce43f4752eeb0f8eb86a911999e1cc11419eb5ffde6e72f67")],
             prompt_style: Some(PromptStyle::Chat),
             prompt_template: Some("Translate this from {source} to {target}. Return only the translation.\n\n{text}".into()),
             estimated_download_bytes: 3 * 1024 * 1024 * 1024,
@@ -386,17 +393,17 @@ pub fn catalog() -> Vec<ModelProfile> {
             name: "Tencent Hy-MT2 1.8B".into(),
             provider: ProviderKind::Custom,
             description: "Legacy entry. Use tencent-hy-mt2-1.8b-gguf from the new catalog instead.".into(),
-            quantization: "1.25-bit GGUF".into(),
-            size: "~440 MB".into(),
-            homepage: "https://huggingface.co/tencent/Hy-MT2-1.8B-1.25Bit-GGUF".into(),
+            quantization: "Q4_K_M GGUF".into(),
+            size: "~1.1 GB".into(),
+            homepage: "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF".into(),
             engine_hint: "Legacy path. See the new model catalog.".into(),
             default_endpoint: None,
-            hf_repo: Some("tencent/Hy-MT2-1.8B-1.25Bit-GGUF".into()),
-            download_filenames: vec!["Hy-MT2-1.8B-1.25Bit.gguf".into()],
+            hf_repo: Some("tencent/Hy-MT2-1.8B-GGUF".into()),
+            download_filenames: vec!["Hy-MT2-1.8B-Q4_K_M.gguf".into()],
             managed_prompt_style: Some("chat".into()),
             managed_prompt_template: Some("Translate the following text from {source} to {target}. Return only the translation.\n\n{text}".into()),
             managed_context_size: Some(4096),
-            install_check_files: vec!["Hy-MT2-1.8B-1.25Bit.gguf".into()],
+            install_check_files: vec!["Hy-MT2-1.8B-Q4_K_M.gguf".into()],
             languages: tencent_languages(),
             downloadable: false,
         },
@@ -584,6 +591,11 @@ fn model_file(repo: &str, path: &str, destination: &str) -> ModelFile {
 impl ModelFile {
     fn with_size(mut self, size_bytes: u64) -> Self {
         self.size_bytes = Some(size_bytes);
+        self
+    }
+
+    fn with_sha256(mut self, sha256: &str) -> Self {
+        self.sha256 = Some(sha256.into());
         self
     }
 }

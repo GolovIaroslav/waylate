@@ -15,12 +15,13 @@ use tokenizers::Tokenizer;
 
 static MODEL_CACHE: OnceLock<Mutex<HashMap<String, LoadedOnnxModel>>> = OnceLock::new();
 
-pub fn translate(
+pub fn translate_with_progress(
     paths: &AppPaths,
     entry: &ModelCatalogEntry,
     text: &str,
     source_lang: &str,
     target_lang: &str,
+    on_progress: &mut dyn FnMut(&str) -> Result<(), String>,
 ) -> Result<String, String> {
     if entry.engine != EngineKind::OnnxEncoderDecoder {
         return Err("Model is not backed by the ONNX engine.".into());
@@ -43,7 +44,7 @@ pub fn translate(
     let model = cache
         .get_mut(&entry.id)
         .ok_or_else(|| "ONNX model cache lost the loaded model unexpectedly".to_string())?;
-    model.translate(text, source_lang, target_lang)
+    model.translate(text, source_lang, target_lang, on_progress)
 }
 
 struct LoadedOnnxModel {
@@ -93,7 +94,13 @@ impl LoadedOnnxModel {
         })
     }
 
-    fn translate(&mut self, text: &str, source_lang: &str, target_lang: &str) -> Result<String, String> {
+    fn translate(
+        &mut self,
+        text: &str,
+        source_lang: &str,
+        target_lang: &str,
+        on_progress: &mut dyn FnMut(&str) -> Result<(), String>,
+    ) -> Result<String, String> {
         let source_lang_id = token_id(&self.tokenizer, source_lang)?;
         let target_lang_id = token_id(&self.tokenizer, target_lang)?;
 
@@ -122,18 +129,13 @@ impl LoadedOnnxModel {
                 break;
             }
             decoder_tokens.push(next_token);
+            let partial = self.decode_generated_tokens(&decoder_tokens)?;
+            if !partial.is_empty() {
+                on_progress(&partial)?;
+            }
         }
 
-        let generated: Vec<u32> = decoder_tokens
-            .into_iter()
-            .skip(2)
-            .filter_map(|id| u32::try_from(id).ok())
-            .collect();
-
-        self.tokenizer
-            .decode(&generated, true)
-            .map(|text| text.trim().to_string())
-            .map_err(|err| format!("Could not decode translated tokens: {err}"))
+        self.decode_generated_tokens(&decoder_tokens)
     }
 
     fn run_encoder(&mut self, input_ids: &[i64], attention_mask: &[i64]) -> Result<Vec<f32>, String> {
@@ -272,6 +274,19 @@ impl LoadedOnnxModel {
         };
         update_cache(&outputs, cache)?;
         Ok(best_id)
+    }
+
+    fn decode_generated_tokens(&self, decoder_tokens: &[i64]) -> Result<String, String> {
+        let generated: Vec<u32> = decoder_tokens
+            .iter()
+            .copied()
+            .skip(2)
+            .filter_map(|id| u32::try_from(id).ok())
+            .collect();
+        self.tokenizer
+            .decode(&generated, true)
+            .map(|text| text.trim().to_string())
+            .map_err(|err| format!("Could not decode translated tokens: {err}"))
     }
 }
 
@@ -436,7 +451,7 @@ mod tests {
         }
 
         let translated = model
-            .translate("Hello world", "eng_Latn", "rus_Cyrl")
+            .translate("Hello world", "eng_Latn", "rus_Cyrl", &mut |_| Ok(()))
             .expect("translation should succeed");
         assert!(!translated.trim().is_empty());
         eprintln!("translation: {translated}");

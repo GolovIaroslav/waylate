@@ -321,15 +321,17 @@ download, basic local diagnostics/log view.
   `ct2TokenizerPath`.
 - [x] Spec downloader supports retry/resume from `.part` files and verifies
   completed file sizes when `size_bytes` is known.
-- [ ] Persist per-model install metadata in config: path, version, hash and
-  install timestamp.
-- [ ] Pin and verify `sha256` hashes for downloadable catalog files.
-- [ ] Add disk-space pre-check before large model downloads.
-- [ ] Add clear delete/reinstall action in Settings.
+- [x] Persist per-model install metadata in config: path, version, install
+  timestamp and installed file list. Hash persistence stays blocked on pinned
+  file `sha256` values.
+- [x] Pin and verify `sha256` hashes for current downloadable catalog files.
+- [x] Add disk-space pre-check before large model downloads.
+- [x] Add clear delete/reinstall action in Settings.
 - [ ] Split or explicitly document the `ManagedLlamaCpp` implementation location
   if it remains in `runtime.rs` rather than `engines/managed_llama.rs`.
-- [ ] Verify Hy-MT2 end-to-end with Waylate-managed `llama-server`.
+- [x] Verify Hy-MT2 end-to-end with Waylate-managed `llama-server`.
 - [ ] Verify TranslateGemma prompt template and license acceptance flow before
-  treating it as shippable.
+  treating it as shippable. Source verification is done; Waylate still lacks
+  the required structured chat-template path and license-acceptance UX.
 - [ ] Finish PR6 hardening: cold-start status, diagnostics/log view, RAM warning
   and zombie-process cleanup polish.

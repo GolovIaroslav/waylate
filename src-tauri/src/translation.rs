@@ -25,11 +25,12 @@ pub struct TranslationResponse {
     pub warning: Option<String>,
 }
 
-pub fn translate(
+pub fn translate_with_progress(
     paths: &AppPaths,
     runtime_manager: &RuntimeManager,
     config: &AppConfig,
     request: &TranslationRequest,
+    on_progress: &mut dyn FnMut(&str) -> Result<(), String>,
 ) -> Result<TranslationResponse, String> {
     if request.text.trim().is_empty() {
         return Err("Nothing to translate".into());
@@ -41,12 +42,8 @@ pub fn translate(
         .find(|item| item.id == request.model_id)
     {
         return match entry.engine {
-            EngineKind::OnnxEncoderDecoder => crate::engines::onnx_mt::translate(
-                paths,
-                &entry,
-                &request.text,
-                &request.source_lang,
-                &request.target_lang,
+            EngineKind::OnnxEncoderDecoder => crate::engines::onnx_mt::translate_with_progress(
+                paths, &entry, &request.text, &request.source_lang, &request.target_lang, on_progress,
             )
             .map(|translated_text| TranslationResponse {
                 translated_text,
@@ -395,5 +392,34 @@ fn ensure_network_enabled(config: &AppConfig) -> Result<(), String> {
         Ok(())
     } else {
         Err("Network API providers are disabled in Settings.".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hy_mt2_smoke_when_enabled() {
+        if std::env::var("WAYLATE_HY_SMOKE").ok().as_deref() != Some("1") {
+            return;
+        }
+
+        let paths = AppPaths::new().expect("app paths should resolve");
+        let mut config = AppConfig::default();
+        config.model_id = "tencent-hy-mt2-1.8b-gguf".into();
+        let runtime = RuntimeManager::new();
+        let request = TranslationRequest {
+            text: "Hello world".into(),
+            source_lang: "en".into(),
+            target_lang: "ru".into(),
+            model_id: "tencent-hy-mt2-1.8b-gguf".into(),
+        };
+
+        let response = translate_with_progress(&paths, &runtime, &config, &request, &mut |_| Ok(()))
+            .expect("Hy-MT2 translation should succeed");
+        assert!(!response.translated_text.trim().is_empty());
+        eprintln!("Hy-MT2 translation: {}", response.translated_text);
+        let _ = runtime.shutdown_all();
     }
 }

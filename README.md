@@ -113,7 +113,14 @@ History is off by default. When enabled, it is stored locally in SQLite.
 npm run check
 cd src-tauri && cargo check
 npm run tauri build
+npm run install:local-release
 ```
+
+Use `npm run install:local-release` when you want to refresh the runnable
+`waylate` command in `~/.local/bin`. It rebuilds the bundled frontend through
+the Tauri CLI, installs the release binary, and relaunches it. Plain
+`cargo build --release` is not the reliable workflow for updating the user-run
+desktop binary.
 
 Project shape:
 

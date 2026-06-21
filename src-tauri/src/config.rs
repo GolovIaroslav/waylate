@@ -1,6 +1,16 @@
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{collections::HashMap, fs, path::PathBuf};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledModelMetadata {
+    pub install_dir: String,
+    pub manifest_version: u8,
+    pub installed_at: String,
+    pub files: Vec<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -29,6 +39,7 @@ pub struct AppConfig {
     pub yandex_folder_id: String,
     pub ui_language: String,
     pub theme: String,
+    pub installed_models: HashMap<String, InstalledModelMetadata>,
 }
 
 impl Default for AppConfig {
@@ -57,6 +68,7 @@ impl Default for AppConfig {
             yandex_folder_id: String::new(),
             ui_language: "en".into(),
             theme: "light".into(),
+            installed_models: HashMap::new(),
         }
     }
 }
@@ -135,6 +147,7 @@ mod tests {
         assert_eq!(config.custom_backend_mode, "external-openai");
         assert_eq!(config.local_context_size, 4096);
         assert_eq!(config.ct2_helper_command, "waylate-ct2-translate");
+        assert!(config.installed_models.is_empty());
     }
 
     #[test]
@@ -146,5 +159,6 @@ mod tests {
         assert_eq!(config.local_model_policy, "balanced");
         assert_eq!(config.custom_backend_mode, "external-openai");
         assert_eq!(config.ct2_helper_command, "waylate-ct2-translate");
+        assert!(config.installed_models.is_empty());
     }
 }

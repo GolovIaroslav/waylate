@@ -6,8 +6,8 @@ use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
     net::TcpListener,
-    os::unix::fs::PermissionsExt,
-    path::PathBuf,
+    os::unix::fs::{symlink, PermissionsExt},
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
     thread,
@@ -277,6 +277,16 @@ impl RuntimeManager {
         let port = pick_free_port()?;
         let endpoint = format!("http://127.0.0.1:{port}");
         let mut command = Command::new(&binary);
+        if let Some(runtime_dir) = managed_llama_library_dir(&binary) {
+            let mut ld_path = runtime_dir.display().to_string();
+            if let Ok(existing) = std::env::var("LD_LIBRARY_PATH") {
+                if !existing.trim().is_empty() {
+                    ld_path.push(':');
+                    ld_path.push_str(&existing);
+                }
+            }
+            command.env("LD_LIBRARY_PATH", ld_path);
+        }
         command
             .arg("--model")
             .arg(model_path.trim())
@@ -882,19 +892,17 @@ pub fn translate_via_spec_llama(
 
 /// Pinned llama.cpp release used for the bundled llama-server.
 /// Update this constant when bumping the bundled runtime version.
-const LLAMA_SERVER_RELEASE: &str = "b5616";
+const LLAMA_SERVER_RELEASE: &str = "b9747";
 const LLAMA_SERVER_ZIP_URL: &str =
-    "https://github.com/ggerganov/llama.cpp/releases/download/b5616/llama-b5616-bin-ubuntu-x64.zip";
-/// Path inside the zip archive where `llama-server` lives.
-const LLAMA_SERVER_ZIP_ENTRY: &str = "build/bin/llama-server";
+    "https://github.com/ggml-org/llama.cpp/releases/download/b9747/llama-b9747-bin-ubuntu-x64.tar.gz";
 
 /// Resolve a usable `llama-server` binary.
 ///
 /// Priority:
 /// 1. Path configured in Advanced settings.
-/// 2. Waylate-managed download at `<data_dir>/runtime/llama-server-<release>`.
-/// 3. `llama-server` found in PATH.
-/// 4. Auto-download from the pinned release URL and install to (2).
+/// 2. Waylate-managed pinned binary at `<data_dir>/runtime/llama-server-<release>`.
+/// 3. Auto-download the pinned release into (2).
+/// 4. `llama-server` found in PATH as a last-resort fallback.
 pub fn ensure_managed_llama_binary(paths: &AppPaths, config: &AppConfig) -> Result<String, String> {
     // 1. User-configured path.
     let configured = config.local_llama_server_path.trim();
@@ -912,17 +920,21 @@ pub fn ensure_managed_llama_binary(paths: &AppPaths, config: &AppConfig) -> Resu
         .data_dir
         .join("runtime")
         .join(format!("llama-server-{LLAMA_SERVER_RELEASE}"));
-    if managed.is_file() {
+    if managed_llama_runtime_complete(&managed) {
         return Ok(managed.display().to_string());
     }
 
-    // 3. System PATH.
+    // 3. Auto-download pinned binary.
+    if let Ok(downloaded) = download_llama_server_binary(paths, &managed) {
+        return Ok(downloaded);
+    }
+
+    // 4. System PATH fallback.
     if let Some(path_binary) = resolve_llama_binary_from_path() {
         return Ok(path_binary);
     }
 
-    // 4. Auto-download.
-    download_llama_server_binary(paths, &managed)
+    Err("Could not find or download a compatible llama-server binary.".into())
 }
 
 fn resolve_llama_binary_from_path() -> Option<String> {
@@ -943,9 +955,12 @@ fn download_llama_server_binary(paths: &AppPaths, dest: &std::path::Path) -> Res
     let runtime_dir = paths.data_dir.join("runtime");
     fs::create_dir_all(&runtime_dir).map_err(|err| err.to_string())?;
 
-    let zip_path = runtime_dir.join(format!("llama-server-{LLAMA_SERVER_RELEASE}.zip"));
+    let archive_path = runtime_dir.join(format!(
+        "llama-server-{LLAMA_SERVER_RELEASE}.{}",
+        if LLAMA_SERVER_ZIP_URL.ends_with(".tar.gz") { "tar.gz" } else { "zip" }
+    ));
 
-    // Download the zip.
+    // Download the archive.
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
@@ -956,60 +971,18 @@ fn download_llama_server_binary(paths: &AppPaths, dest: &std::path::Path) -> Res
         .map_err(|err| format!("Could not download llama-server: {err}"))?
         .error_for_status()
         .map_err(|err| format!("llama-server download returned an error: {err}"))?;
-    let mut zip_file = File::create(&zip_path)
-        .map_err(|err| format!("Could not create zip file: {err}"))?;
-    std::io::copy(&mut response, &mut zip_file)
-        .map_err(|err| format!("Could not write zip file: {err}"))?;
-    drop(zip_file);
+    let mut archive_file = File::create(&archive_path)
+        .map_err(|err| format!("Could not create llama archive: {err}"))?;
+    std::io::copy(&mut response, &mut archive_file)
+        .map_err(|err| format!("Could not write llama archive: {err}"))?;
+    drop(archive_file);
 
-    // Extract llama-server from the zip.
-    let zip_data = fs::read(&zip_path).map_err(|err| err.to_string())?;
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_data))
-        .map_err(|err| format!("Could not open zip: {err}"))?;
-    let entry_name = LLAMA_SERVER_ZIP_ENTRY;
-    let mut found = false;
-    for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .map_err(|err| format!("Could not read zip entry: {err}"))?;
-        if file.name() == entry_name {
-            let mut out = File::create(dest)
-                .map_err(|err| format!("Could not create llama-server binary: {err}"))?;
-            std::io::copy(&mut file, &mut out)
-                .map_err(|err| format!("Could not extract llama-server: {err}"))?;
-            found = true;
-            break;
-        }
+    if LLAMA_SERVER_ZIP_URL.ends_with(".tar.gz") {
+        extract_llama_runtime_tar_gz(&archive_path, dest)?;
+    } else {
+        extract_llama_runtime_zip(&archive_path, dest)?;
     }
-    let _ = fs::remove_file(&zip_path);
-    if !found {
-        // Try alternate entry paths used in older releases (binary at root).
-        let zip_data2 = fs::read(&zip_path).unwrap_or_default();
-        if !zip_data2.is_empty() {
-            let mut archive2 = zip::ZipArchive::new(std::io::Cursor::new(zip_data2))
-                .map_err(|err| format!("Could not reopen zip: {err}"))?;
-            for i in 0..archive2.len() {
-                let mut file = archive2
-                    .by_index(i)
-                    .map_err(|err| format!("Could not read zip entry: {err}"))?;
-                let name = file.name().to_string();
-                if name.ends_with("llama-server") || name == "llama-server" {
-                    let mut out = File::create(dest)
-                        .map_err(|err| format!("Could not create llama-server binary: {err}"))?;
-                    std::io::copy(&mut file, &mut out)
-                        .map_err(|err| format!("Could not extract llama-server: {err}"))?;
-                    found = true;
-                    break;
-                }
-            }
-        }
-        if !found {
-            return Err(format!(
-                "llama-server not found inside the downloaded archive at '{entry_name}'. \
-                 The release format may have changed — set a custom path in Advanced settings."
-            ));
-        }
-    }
+    let _ = fs::remove_file(&archive_path);
 
     // Make the binary executable.
     let mut perms = fs::metadata(dest)
@@ -1019,6 +992,138 @@ fn download_llama_server_binary(paths: &AppPaths, dest: &std::path::Path) -> Res
     fs::set_permissions(dest, perms).map_err(|err| err.to_string())?;
 
     Ok(dest.display().to_string())
+}
+
+fn extract_llama_runtime_zip(archive_path: &Path, dest: &Path) -> Result<(), String> {
+    let zip_data = fs::read(archive_path).map_err(|err| err.to_string())?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_data))
+        .map_err(|err| format!("Could not open llama runtime zip: {err}"))?;
+    let runtime_dir = dest.parent().unwrap_or_else(|| Path::new("."));
+    let mut companion_dir = None::<String>;
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .map_err(|err| format!("Could not read zip entry: {err}"))?;
+        let name = file.name().to_string();
+        if name.ends_with("llama-server") || name == "llama-server" {
+            let mut out = File::create(dest)
+                .map_err(|err| format!("Could not create llama-server binary: {err}"))?;
+            std::io::copy(&mut file, &mut out)
+                .map_err(|err| format!("Could not extract llama-server: {err}"))?;
+            companion_dir = Path::new(&name)
+                .parent()
+                .map(|parent| parent.to_string_lossy().to_string());
+            break;
+        }
+    }
+    let Some(companion_dir) = companion_dir else {
+        return Err("llama-server not found inside the downloaded zip archive.".into());
+    };
+
+    let zip_data = fs::read(archive_path).map_err(|err| err.to_string())?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_data))
+        .map_err(|err| format!("Could not reopen llama runtime zip: {err}"))?;
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .map_err(|err| format!("Could not read zip entry: {err}"))?;
+        let name = file.name().to_string();
+        if !name.starts_with(&companion_dir) {
+            continue;
+        }
+        let Some(filename) = Path::new(&name).file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let is_shared_lib = filename.starts_with("lib") && (filename.contains(".so") || filename == "mtmd.dll");
+        if !is_shared_lib {
+            continue;
+        }
+        let dest_path = runtime_dir.join(filename);
+        let mut out = File::create(&dest_path)
+            .map_err(|err| format!("Could not create {}: {err}", dest_path.display()))?;
+        std::io::copy(&mut file, &mut out)
+            .map_err(|err| format!("Could not extract {}: {err}", filename))?;
+        let mut perms = fs::metadata(&dest_path)
+            .map_err(|err| err.to_string())?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&dest_path, perms).map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+fn extract_llama_runtime_tar_gz(archive_path: &Path, dest: &Path) -> Result<(), String> {
+    let runtime_dir = dest.parent().unwrap_or_else(|| Path::new("."));
+    let archive_file = File::open(archive_path).map_err(|err| err.to_string())?;
+    let decoder = flate2::read::GzDecoder::new(archive_file);
+    let mut archive = tar::Archive::new(decoder);
+    let mut found = false;
+    for entry in archive.entries().map_err(|err| format!("Could not read llama tar entries: {err}"))? {
+        let mut entry = entry.map_err(|err| format!("Could not read llama tar entry: {err}"))?;
+        let path = entry.path().map_err(|err| err.to_string())?.into_owned();
+        let Some(filename) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if filename == "llama-server" {
+            let mut out = File::create(dest)
+                .map_err(|err| format!("Could not create llama-server binary: {err}"))?;
+            std::io::copy(&mut entry, &mut out)
+                .map_err(|err| format!("Could not extract llama-server: {err}"))?;
+            found = true;
+            continue;
+        }
+        let is_shared_lib = filename.starts_with("lib") && filename.contains(".so");
+        if !is_shared_lib {
+            continue;
+        }
+        let dest_path = runtime_dir.join(filename);
+        let _ = fs::remove_file(&dest_path);
+        if entry.header().entry_type().is_symlink() {
+            let link_target = entry
+                .link_name()
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| format!("Missing symlink target for {}", filename))?;
+            symlink(&link_target, &dest_path)
+                .map_err(|err| format!("Could not create symlink {}: {err}", dest_path.display()))?;
+            continue;
+        }
+        let mut out = File::create(&dest_path)
+            .map_err(|err| format!("Could not create {}: {err}", dest_path.display()))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|err| format!("Could not extract {}: {err}", filename))?;
+        let mut perms = fs::metadata(&dest_path)
+            .map_err(|err| err.to_string())?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&dest_path, perms).map_err(|err| err.to_string())?;
+    }
+    if !found {
+        return Err("llama-server not found inside the downloaded tar.gz archive.".into());
+    }
+    Ok(())
+}
+
+fn managed_llama_runtime_complete(binary: &Path) -> bool {
+    if !binary.is_file() {
+        return false;
+    }
+    let runtime_dir = binary.parent().unwrap_or_else(|| Path::new("."));
+    ["libllama.so", "libllama-common.so.0", "libggml.so.0"]
+        .iter()
+        .all(|name| {
+            let path = runtime_dir.join(name);
+            std::fs::symlink_metadata(&path)
+                .map(|meta| meta.file_type().is_symlink() || meta.len() > 0)
+                .unwrap_or(false)
+        })
+}
+
+fn managed_llama_library_dir(binary: &str) -> Option<PathBuf> {
+    let path = Path::new(binary);
+    if !managed_llama_runtime_complete(path) {
+        return None;
+    }
+    path.parent().map(Path::to_path_buf)
 }
 
 #[cfg(test)]

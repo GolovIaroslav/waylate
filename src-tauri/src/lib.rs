@@ -9,12 +9,14 @@ mod secrets;
 mod translation;
 
 use chrono::Utc;
-use config::{AppConfig, AppPaths};
+use config::{AppConfig, AppPaths, InstalledModelMetadata};
 use models::{InstallState, ModelCatalogEntry, ModelProfile, ProviderKind};
 use runtime::{RuntimeManager, RuntimeReport};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
+    ffi::CString,
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -102,6 +104,13 @@ struct DownloadProgress {
     total_bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TranslationProgress {
+    status: String,
+    translated_text: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct ModelInstallState {
@@ -180,7 +189,7 @@ fn get_model_status(state: State<'_, AppState>, profile_id: String) -> Result<In
     if profile.files.is_empty() {
         return Ok(InstallState::NotInstalled);
     }
-    if has_spec_install_manifest(&target, &profile) {
+    if has_persisted_spec_install(&config, &target, &profile) && has_spec_install_manifest(&target, &profile) {
         return Ok(InstallState::Ready);
     }
     if spec_dir_has_partial_files(&target, &profile) {
@@ -206,12 +215,38 @@ fn save_config(state: State<'_, AppState>, next: AppConfig) -> Result<AppConfig,
 }
 
 #[tauri::command]
-fn translate_text(
+async fn translate_text(
+    app: AppHandle,
     state: State<'_, AppState>,
     request: TranslationRequest,
 ) -> Result<TranslationResponse, String> {
     let config = config::load(&state.paths)?;
-    let response = translation::translate(&state.paths, &state.runtime, &config, &request)?;
+    let paths = state.paths.clone();
+    let runtime = state.runtime.clone();
+    let request_for_worker = request.clone();
+    let app_for_worker = app.clone();
+    let config_for_worker = config.clone();
+    let response = tauri::async_runtime::spawn_blocking(move || {
+        let mut sent_any_progress = false;
+        let mut emit_partial = |partial: &str| -> Result<(), String> {
+            sent_any_progress = true;
+            emit_translation_progress(&app_for_worker, "streaming", partial);
+            Ok(())
+        };
+        let response = translation::translate_with_progress(
+            &paths,
+            &runtime,
+            &config_for_worker,
+            &request_for_worker,
+            &mut emit_partial,
+        )?;
+        if !sent_any_progress {
+            emit_translation_progress(&app_for_worker, "done", &response.translated_text);
+        }
+        Ok::<TranslationResponse, String>(response)
+    })
+    .await
+    .map_err(|err| err.to_string())??;
     state
         .runtime
         .apply_post_translate_policy(&config, &request.model_id);
@@ -312,6 +347,22 @@ async fn install_model(app: AppHandle, state: State<'_, AppState>, profile_id: S
 }
 
 #[tauri::command]
+fn uninstall_model(state: State<'_, AppState>, profile_id: String) -> Result<(), String> {
+    let profile = models::model_catalog()
+        .into_iter()
+        .find(|item| item.id == profile_id)
+        .ok_or_else(|| "Unknown model profile".to_string())?;
+    let target = state.paths.models_dir.join(&profile.id);
+    let _ = state.runtime.shutdown_profile(&profile.id);
+    if target.exists() {
+        std::fs::remove_dir_all(&target)
+            .map_err(|err| format!("Could not delete {}: {err}", target.display()))?;
+    }
+    clear_installed_model_metadata(&state.paths, &profile.id)?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn download_catalog_model(app: AppHandle, state: State<'_, AppState>, model_id: String) -> Result<String, String> {
     let base_config = config::load(&state.paths)?;
     let profile = models::catalog()
@@ -392,7 +443,9 @@ fn download_spec_model_files(
 
     let target = paths.models_dir.join(&profile.id);
     std::fs::create_dir_all(&target).map_err(|err| err.to_string())?;
+    clear_installed_model_metadata(paths, &profile.id)?;
     clear_install_manifest(&target);
+    ensure_enough_disk_space(paths, &target, profile)?;
 
     emit_download(app, &profile.id, "starting", "Checking files", 0.02, 0, Some(profile.estimated_download_bytes));
 
@@ -411,14 +464,11 @@ fn download_spec_model_files(
         }
 
         let local_path = target.join(&file.destination);
+        if is_complete_spec_file(&local_path, file)? {
+            continue;
+        }
         if local_path.is_file() {
-            if let Some(expected) = file.size_bytes {
-                if local_path.metadata().map(|metadata| metadata.len()).unwrap_or_default() == expected {
-                    continue;
-                }
-            } else {
-                continue;
-            }
+            let _ = std::fs::remove_file(&local_path);
         }
         if let Some(parent) = local_path.parent() {
             std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
@@ -501,9 +551,11 @@ fn download_spec_model_files(
         }
         std::fs::rename(&part_path, &local_path)
             .map_err(|err| format!("Could not finalize {}: {err}", local_path.display()))?;
+        verify_spec_file(&local_path, file)?;
     }
 
     write_spec_install_manifest(&target, profile)?;
+    persist_spec_install_metadata(paths, profile, &target)?;
     emit_download(app, &profile.id, "done", "Ready", 1.0, downloaded, total);
     Ok(target.display().to_string())
 }
@@ -775,6 +827,76 @@ fn emit_download(
     );
 }
 
+fn emit_translation_progress(app: &AppHandle, status: &str, translated_text: &str) {
+    let _ = app.emit(
+        "translation-progress",
+        TranslationProgress {
+            status: status.into(),
+            translated_text: translated_text.into(),
+        },
+    );
+}
+
+fn ensure_enough_disk_space(paths: &AppPaths, target: &Path, profile: &ModelCatalogEntry) -> Result<(), String> {
+    let current_bytes = current_model_dir_bytes(target)?;
+    let needed = profile
+        .estimated_disk_bytes
+        .saturating_sub(current_bytes)
+        .saturating_add(64 * 1024 * 1024);
+    let available = free_disk_bytes(&paths.models_dir)?;
+    if available < needed {
+        return Err(format!(
+            "Not enough free disk space for {}. Need about {}, but only {} is available.",
+            profile.name,
+            human_bytes(needed),
+            human_bytes(available)
+        ));
+    }
+    Ok(())
+}
+
+fn current_model_dir_bytes(path: &Path) -> Result<u64, String> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let mut total = 0_u64;
+    for entry in std::fs::read_dir(path).map_err(|err| err.to_string())? {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let entry_path = entry.path();
+        if entry.file_name().to_string_lossy() == ".waylate-complete.json" {
+            continue;
+        }
+        if entry_path.is_dir() {
+            total = total.saturating_add(current_model_dir_bytes(&entry_path)?);
+        } else {
+            total = total.saturating_add(entry.metadata().map_err(|err| err.to_string())?.len());
+        }
+    }
+    Ok(total)
+}
+
+fn free_disk_bytes(path: &Path) -> Result<u64, String> {
+    let c_path = CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|_| format!("Could not inspect free space for {}", path.display()))?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), stats.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(format!("Could not inspect free space for {}", path.display()));
+    }
+    let stats = unsafe { stats.assume_init() };
+    Ok((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    if bytes >= GIB {
+        format!("{:.1} GB", bytes as f64 / GIB as f64)
+    } else {
+        format!("{} MB", (bytes / MIB).max(1))
+    }
+}
+
 fn read_selection_with_fallback() -> Result<(String, Option<String>), String> {
     match clipboard::read_primary_selection() {
         Ok(text) if !text.trim().is_empty() => Ok((text, None)),
@@ -966,6 +1088,9 @@ fn collect_model_states(paths: &AppPaths, config: &AppConfig, catalog: &[ModelPr
 }
 
 fn install_status(paths: &AppPaths, config: &AppConfig, profile: &ModelProfile) -> &'static str {
+    if let Some(spec) = models::model_catalog().into_iter().find(|entry| entry.id == profile.id) {
+        return spec_install_status(paths, config, &spec);
+    }
     if profile.provider == ProviderKind::CTranslate2
         || (profile.provider == ProviderKind::Custom && profile.id != "custom-local")
     {
@@ -1011,6 +1136,17 @@ fn install_status(paths: &AppPaths, config: &AppConfig, profile: &ModelProfile) 
         ProviderKind::CTranslate2 => "missing",
         ProviderKind::OpenAiCompatible => "missing",
     }
+}
+
+fn spec_install_status(paths: &AppPaths, config: &AppConfig, profile: &ModelCatalogEntry) -> &'static str {
+    let target = paths.models_dir.join(&profile.id);
+    if has_persisted_spec_install(config, &target, profile) && has_spec_install_manifest(&target, profile) {
+        return "installed";
+    }
+    if spec_dir_has_partial_files(&target, profile) {
+        return "partial";
+    }
+    "missing"
 }
 
 fn catalog_install_status(path: &Path, profile: &ModelProfile) -> &'static str {
@@ -1085,6 +1221,71 @@ fn has_spec_install_manifest(path: &Path, profile: &ModelCatalogEntry) -> bool {
     profile.files.iter().all(|file| path.join(&file.destination).is_file())
 }
 
+fn has_persisted_spec_install(config: &AppConfig, path: &Path, profile: &ModelCatalogEntry) -> bool {
+    let Some(metadata) = config.installed_models.get(&profile.id) else {
+        return false;
+    };
+    if metadata.manifest_version != 1 {
+        return false;
+    }
+    if metadata.install_dir != path.display().to_string() {
+        return false;
+    }
+    if metadata.files.len() != profile.files.len() {
+        return false;
+    }
+    profile
+        .files
+        .iter()
+        .all(|file| metadata.files.iter().any(|name| name == &file.destination))
+}
+
+fn is_complete_spec_file(path: &Path, file: &models::ModelFile) -> Result<bool, String> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    if let Some(expected) = file.size_bytes {
+        let actual = path.metadata().map_err(|err| err.to_string())?.len();
+        if actual != expected {
+            return Ok(false);
+        }
+    }
+    if let Some(expected) = &file.sha256 {
+        return Ok(file_sha256(path)? == *expected);
+    }
+    Ok(true)
+}
+
+fn verify_spec_file(path: &Path, file: &models::ModelFile) -> Result<(), String> {
+    if let Some(expected) = &file.sha256 {
+        let actual = file_sha256(path)?;
+        if actual != *expected {
+            return Err(format!(
+                "SHA256 verification failed for {}.",
+                file.destination
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn file_sha256(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path)
+        .map_err(|err| format!("Could not open {} for SHA256 verification: {err}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 128 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|err| format!("Could not read {} for SHA256 verification: {err}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 fn spec_dir_has_partial_files(path: &Path, profile: &ModelCatalogEntry) -> bool {
     profile.files.iter().any(|file| path.join(&file.destination).exists())
         || dir_has_any_files(path)
@@ -1096,6 +1297,14 @@ fn install_manifest_path(path: &Path) -> PathBuf {
 
 fn clear_install_manifest(path: &Path) {
     let _ = std::fs::remove_file(install_manifest_path(path));
+}
+
+fn clear_installed_model_metadata(paths: &AppPaths, model_id: &str) -> Result<(), String> {
+    let mut config = config::load(paths)?;
+    if config.installed_models.remove(model_id).is_some() {
+        config::save(paths, &config)?;
+    }
+    Ok(())
 }
 
 fn write_install_manifest(path: &Path, repo: &str, profile: &ModelProfile) -> Result<(), String> {
@@ -1136,6 +1345,24 @@ fn write_spec_install_manifest(path: &Path, profile: &ModelCatalogEntry) -> Resu
     };
     let raw = serde_json::to_vec_pretty(&manifest).map_err(|err| err.to_string())?;
     std::fs::write(install_manifest_path(path), raw).map_err(|err| err.to_string())
+}
+
+fn persist_spec_install_metadata(
+    paths: &AppPaths,
+    profile: &ModelCatalogEntry,
+    install_dir: &Path,
+) -> Result<(), String> {
+    let mut config = config::load(paths)?;
+    config.installed_models.insert(
+        profile.id.clone(),
+        InstalledModelMetadata {
+            install_dir: install_dir.display().to_string(),
+            manifest_version: 1,
+            installed_at: Utc::now().to_rfc3339(),
+            files: profile.files.iter().map(|file| file.destination.clone()).collect(),
+        },
+    );
+    config::save(paths, &config)
 }
 
 fn existing_spec_downloaded_bytes(target: &Path, profile: &ModelCatalogEntry) -> u64 {
@@ -1202,6 +1429,7 @@ pub fn run() {
             get_snapshot,
             list_model_profiles,
             install_model,
+            uninstall_model,
             cancel_model_install,
             get_model_status,
             save_config,

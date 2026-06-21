@@ -192,6 +192,11 @@
     totalBytes?: number;
   };
 
+  type TranslationProgress = {
+    status: "streaming" | "done";
+    translatedText: string;
+  };
+
   type UiLang = "en" | "ru" | "sk";
 
   let snapshot: Snapshot | null = null;
@@ -595,6 +600,8 @@
       enterNewKey: "Enter a new key",
       clearField: "Clear field",
       partialDownload: "Download again",
+      reinstall: "Reinstall",
+      deleteModel: "Delete",
       openModelFolder: "Open models folder",
       openConfigFolder: "Open settings folder",
       sampleTranslation: "Sample translation",
@@ -710,6 +717,8 @@
       enterNewKey: "Введите новый ключ",
       clearField: "Очистить поле",
       partialDownload: "Скачать заново",
+      reinstall: "Переустановить",
+      deleteModel: "Удалить",
       openModelFolder: "Открыть папку моделей",
       openConfigFolder: "Открыть папку настроек",
       sampleTranslation: "Пробный перевод",
@@ -825,6 +834,8 @@
       enterNewKey: "Zadajte nový kľúč",
       clearField: "Vymazať pole",
       partialDownload: "Stiahnuť znova",
+      reinstall: "Nainštalovať znova",
+      deleteModel: "Odstrániť",
       openModelFolder: "Otvoriť priečinok modelov",
       openConfigFolder: "Otvoriť priečinok nastavení",
       sampleTranslation: "Skúšobný preklad",
@@ -834,6 +845,7 @@
   onMount(() => {
     let unlisten: (() => void) | undefined;
     let unlistenDownload: (() => void) | undefined;
+    let unlistenTranslation: (() => void) | undefined;
     const savedScale = Number(localStorage.getItem("waylate-ui-scale"));
     setUiScale(Number.isFinite(savedScale) && savedScale >= 1 ? savedScale : 1);
     const handleKeydown = (event: KeyboardEvent) => {
@@ -869,10 +881,15 @@
       unlistenDownload = await listen<DownloadProgress>("model-download-progress", (event) => {
         downloadState = event.payload;
       });
+      unlistenTranslation = await listen<TranslationProgress>("translation-progress", (event) => {
+        if (!translating) return;
+        translatedText = event.payload.translatedText;
+      });
     })();
     return () => {
       unlisten?.();
       unlistenDownload?.();
+      unlistenTranslation?.();
       window.removeEventListener("keydown", handleKeydown);
       window.removeEventListener("wheel", handleWheel);
       document.removeEventListener("click", handleDocumentClick);
@@ -922,6 +939,7 @@
     error = "";
     status = "";
     probeResult = "";
+    translatedText = "";
     if (!sourceText.trim()) {
       error = t("nothingToTranslate");
       return;
@@ -1084,6 +1102,31 @@
     } finally {
       downloading = false;
     }
+  }
+
+  async function removeModel(modelId: string) {
+    downloading = true;
+    error = "";
+    status = "";
+    probeResult = "";
+    try {
+      await invoke("uninstall_model", { profileId: modelId });
+      if (downloadState?.modelId === modelId) {
+        downloadState = null;
+      }
+      await refresh();
+      status = t("settingsSaved");
+    } catch (err) {
+      error = friendlyErrorMessage(err);
+    } finally {
+      downloading = false;
+    }
+  }
+
+  async function reinstallModel(modelId: string) {
+    await removeModel(modelId);
+    if (error) return;
+    await downloadModel(modelId);
   }
 
   async function cancelDownload() {
@@ -1681,13 +1724,23 @@
                       <button on:click={cancelDownload}>{t("cancel")}</button>
                     </div>
                   {:else if specModelState(model.id) === "installed"}
-                    <button class="primary" disabled>
-                      <CheckCircle2 size={16} /> {t("downloaded")}
-                    </button>
+                    <div class="model-card-actions">
+                      <button class="primary" on:click={() => reinstallModel(model.id)} disabled={downloading || testing || translating}>
+                        <RefreshCw size={16} /> {t("reinstall")}
+                      </button>
+                      <button on:click={() => removeModel(model.id)} disabled={downloading || testing || translating}>
+                        <Trash2 size={16} /> {t("deleteModel")}
+                      </button>
+                    </div>
                   {:else if specModelState(model.id) === "partial"}
-                    <button class="primary" on:click={() => downloadModel(model.id)} disabled={downloading || testing || translating}>
-                      <Download size={16} /> {t("partialDownload")}
-                    </button>
+                    <div class="model-card-actions">
+                      <button class="primary" on:click={() => downloadModel(model.id)} disabled={downloading || testing || translating}>
+                        <Download size={16} /> {t("partialDownload")}
+                      </button>
+                      <button on:click={() => removeModel(model.id)} disabled={downloading || testing || translating}>
+                        <Trash2 size={16} /> {t("deleteModel")}
+                      </button>
+                    </div>
                   {:else if !model.downloadable}
                     <button disabled>
                       {t("comingSoon")}
@@ -2510,6 +2563,15 @@
   .download-progress {
     display: grid;
     gap: 6px;
+  }
+
+  .model-card-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .model-card-actions button {
+    flex: 1;
   }
 
   .progress-meta {
