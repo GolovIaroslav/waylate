@@ -32,3 +32,4 @@
 ## ONNX Cache Flow → see src-tauri/src/engines/onnx_mt.rs | Xenova merged decoder requires cache-aware `present.*` → `past_key_values.*` reuse; zero-length dummy cache tensors fail in `ort`.
 ## Beginner ONNX Default → see src-tauri/src/config.rs and src/routes/+page.svelte | Fresh installs should select `nllb-200-distilled-600m-onnx`; spec ONNX readiness must not depend on legacy CT2 config paths.
 ## Spec Verification → see docs/plans/2026-06-21-engine-spec-verification.md | NLLB ONNX is smoke-tested, but install metadata, hashes, disk checks, delete/reinstall, Hy-MT2 verification and PR6 hardening remain open.
+## Launch Regression → see src-tauri/tauri.conf.json and src-tauri/src/lib.rs | Installed release may show `Could not connect to localhost: Connection refused`; next session should diagnose Tauri frontend loading before more engine work.
