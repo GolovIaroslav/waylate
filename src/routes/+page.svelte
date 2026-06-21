@@ -14,7 +14,6 @@
     Languages,
     RefreshCw,
     Repeat2,
-    Save,
     Settings,
     Trash2,
     ZoomIn,
@@ -45,7 +44,52 @@
     engineHint: string;
     defaultEndpoint?: string;
     hfRepo?: string;
+    installCheckFiles?: string[];
     languages: Language[];
+    downloadable: boolean;
+  };
+
+  type ModelInstallState = {
+    modelId: string;
+    status: "missing" | "partial" | "installed";
+  };
+
+  type EngineKind = "onnx-encoder-decoder" | "managed-llama-cpp" | "open-ai-compatible" | "network-api";
+  type Audience = "beginner" | "high-quality" | "advanced";
+  type PromptStyle = "chat" | "completion";
+
+  type LanguageCode = {
+    uiCode: string;
+    label: string;
+    nllbCode?: string;
+    onnxMarianPair?: string;
+    llmLanguageName?: string;
+  };
+
+  type ModelFile = {
+    repo: string;
+    path: string;
+    sha256?: string;
+    sizeBytes?: number;
+    destination: string;
+  };
+
+  type ModelCatalogEntry = {
+    id: string;
+    name: string;
+    engine: EngineKind;
+    audience: Audience;
+    license: string;
+    licenseUrl: string;
+    homepage: string;
+    description: string;
+    languages: LanguageCode[];
+    files: ModelFile[];
+    promptStyle?: PromptStyle;
+    promptTemplate?: string;
+    estimatedDownloadBytes: number;
+    estimatedDiskBytes: number;
+    minRamBytes?: number;
     downloadable: boolean;
   };
 
@@ -89,6 +133,7 @@
     config: AppConfig;
     catalog: ModelProfile[];
     installedModelIds: string[];
+    modelStates: ModelInstallState[];
     history: HistoryEntry[];
     environment: {
       desktop: string;
@@ -150,11 +195,14 @@
   let translatedText = "";
   let status = "";
   let error = "";
-  let busy = false;
+  let translating = false;
+  let testing = false;
+  let downloading = false;
   let deeplKey = "";
   let googleKey = "";
   let yandexKey = "";
   let localKey = "";
+  let probeResult = "";
   let uiScale = 1;
   let sourceLanguageQuery = "";
   let targetLanguageQuery = "";
@@ -168,12 +216,18 @@
   let configSignature = "";
   let configSaveBusy = false;
   let configSaveQueued = false;
+  let modelProfiles: ModelCatalogEntry[] = [];
+  let modelStatuses: Record<string, string> = {};
+  let secretSaveTimers: Partial<Record<SecretProvider, number>> = {};
 
-  $: selectedModel = snapshot?.catalog.find((model) => model.id === config?.modelId);
+  type SecretProvider = "deepl" | "google" | "yandex" | "openai-compatible";
+
+  $: selectedModel = modelProfiles.find((model) => model.id === config?.modelId)
+    ?? snapshot?.catalog.find((model) => model.id === config?.modelId);
   $: languages = selectedModel?.languages ?? [];
-  $: localModelReady = isCurrentModelReady();
-  $: curatedModels = localCatalogModels();
-  $: selectableModels = availableTranslateModels();
+  $: localModelReady = Boolean(selectedModel && (specModelState(selectedModel.id) === "installed" || isModelInstalled(selectedModel.id) || hasInstalledModelFiles()));
+  $: curatedModels = modelProfiles;
+  $: selectableModels = availableTranslateModels(snapshot, config);
   $: uiLang = config?.uiLanguage === "ru" || config?.uiLanguage === "sk" ? config.uiLanguage : "en";
   $: if (config) applyTheme(config.theme);
   $: if (config && snapshot) scheduleConfigSave();
@@ -246,6 +300,60 @@
     kor_Hang: ["korean", "корейский", "korejcina", "kórejčina"],
   };
 
+  const fallbackCatalogLanguages: Language[] = [
+    { code: "auto", name: "Auto detect" },
+    { code: "en", name: "English" },
+    { code: "ru", name: "Russian" },
+    { code: "sk", name: "Slovak" },
+    { code: "de", name: "German" },
+  ];
+
+  const fallbackCatalog: ModelCatalogEntry[] = [
+    {
+      id: "nllb-200-distilled-600m-onnx",
+      name: "NLLB-200 (600M)",
+      engine: "onnx-encoder-decoder",
+      audience: "beginner",
+      license: "MIT",
+      licenseUrl: "https://huggingface.co/meta-llama/Llama-2-7b/blob/main/LICENSE",
+      homepage: "https://huggingface.co/facebook/nllb-200-distilled-600M",
+      description: "Recommended first local model. Fast, multilingual, and runs natively on CPU.",
+      languages: fallbackCatalogLanguages,
+      files: [],
+      promptStyle: null,
+      promptTemplate: null,
+      estimatedDownloadBytes: 600 * 1024 * 1024,
+      estimatedDiskBytes: 1200 * 1024 * 1024,
+      minRamBytes: 2 * 1024 * 1024 * 1024,
+      downloadable: false,
+    },
+    {
+      id: "tencent-hy-mt2-1.8b-gguf",
+      name: "Tencent Hy-MT2 1.8B",
+      engine: "managed-llama-cpp",
+      audience: "beginner",
+      license: "Apache 2.0",
+      licenseUrl: "https://huggingface.co/tencent/Hy-MT2-1.8B-1.25Bit-GGUF",
+      homepage: "https://huggingface.co/tencent/Hy-MT2-1.8B-1.25Bit-GGUF",
+      description: "Compact multilingual GGUF model with high quality for its size.",
+      languages: fallbackCatalogLanguages,
+      files: [],
+      promptStyle: "chat",
+      promptTemplate: null,
+      estimatedDownloadBytes: 440 * 1024 * 1024,
+      estimatedDiskBytes: 440 * 1024 * 1024,
+      minRamBytes: null,
+      downloadable: true,
+    },
+  ];
+
+  const builtInCatalogOrder = [
+    "nllb-200-distilled-600m-onnx",
+    "tencent-hy-mt2-1.8b-gguf",
+    "translategemma-4b-gguf",
+    "milmmt-46-1b-gguf",
+  ] as const;
+
   const helpTexts = {
     openaiEndpoint: {
       en: "For custom setups only.",
@@ -290,7 +398,7 @@
     customBackendMode: {
       en: "External OpenAI-compatible uses your own server. Managed GGUF starts a hidden llama-server process for a local GGUF file.",
       ru: "Внешний OpenAI-compatible использует Ваш готовый сервер. Managed GGUF сам запускает скрытый llama-server для локального GGUF-файла.",
-      sk: "External OpenAI-compatible používa tvoj vlastný server. Managed GGUF spustí skrytý llama-server pre lokálny GGUF súbor.",
+      sk: "External OpenAI-compatible používa Váš vlastný server. Managed GGUF spustí skrytý llama-server pre lokálny GGUF súbor.",
     },
     customModelPath: {
       en: "Path to a local GGUF file when Managed GGUF mode is selected.",
@@ -350,7 +458,7 @@
     yandexFolderId: {
       en: "ID of your Yandex Cloud folder.",
       ru: "ID Вашей папки в Yandex Cloud.",
-      sk: "ID tvojho priečinka v Yandex Cloud.",
+      sk: "ID Vášho priečinka v Yandex Cloud.",
     },
     localBearer: {
       en: "Only needed for a custom local setup.",
@@ -358,12 +466,12 @@
       sk: "Treba len pre ručné lokálne nastavenie.",
     },
     uiLanguage: {
-      en: "Changes the visible interface language immediately. Save settings to keep it after restart.",
+      en: "Changes the visible interface language immediately and saves it automatically.",
       ru: "Меняет язык интерфейса сразу. Изменение сохраняется автоматически.",
       sk: "Okamžite zmení jazyk rozhrania. Ulož nastavenia, aby zostal aj po reštarte.",
     },
     theme: {
-      en: "Switches the interface between light and dark mode. Save settings to keep it after restart.",
+      en: "Switches the interface between light and dark mode and saves it automatically.",
       ru: "Переключает интерфейс между светлой и тёмной темой. Изменение сохраняется автоматически.",
       sk: "Prepína rozhranie medzi svetlým a tmavým režimom. Ulož nastavenia, aby zostal aj po reštarte.",
     },
@@ -399,7 +507,6 @@
       downloading: "Downloading",
       cancel: "Cancel",
       retry: "Retry",
-      saveSettings: "Save settings",
       testBackend: "Test translation",
       modelPath: "Model path",
       tokenizer: "Tokenizer",
@@ -441,7 +548,7 @@
       yandexKey: "Yandex API key",
       yandexFolderId: "Yandex Folder ID",
       localBearer: "Local bearer token",
-      storedSecret: "Saved key",
+      storedSecret: "Enter a new key",
       optionalLocalServer: "Optional",
       system: "System",
       config: "Config",
@@ -457,6 +564,7 @@
       keySaved: "API key saved.",
       keyRemoved: "API key removed.",
       backendOk: "Translation works.",
+      translationReady: "Translation is ready.",
       downloaded: "Ready",
       localRuntimeUnavailable: "The local translator did not respond. Waylate restarted it. Please try again.",
       quantization: "Version",
@@ -473,11 +581,17 @@
       modelInstalledCold: "The model is installed. It will load into memory on the first translation.",
       modelInstalledWarm: "The model is installed and already loaded into memory.",
       modelNeedsDownload: "The model is not installed yet. Download it below.",
+      modelNeedsRetry: "The previous download did not finish. Download the model again.",
       builtInModels: "Built-in models",
-      diagnosticsTitle: "Technical diagnostics",
-      diagnosticsHint: "Only for checking the environment and acceleration. These details are not needed for normal use.",
       runtimeProbe: "Check local translation",
       modelDetails: "Details",
+      savedInSystem: "Saved in the system",
+      enterNewKey: "Enter a new key",
+      clearField: "Clear field",
+      partialDownload: "Download again",
+      openModelFolder: "Open models folder",
+      openConfigFolder: "Open settings folder",
+      sampleTranslation: "Sample translation",
     },
     ru: {
       translate: "Перевести",
@@ -508,7 +622,6 @@
       downloading: "Скачивается",
       cancel: "Отмена",
       retry: "Повторить",
-      saveSettings: "Сохранить настройки",
       testBackend: "Проверить перевод",
       modelPath: "Путь модели",
       tokenizer: "Токенизатор",
@@ -550,7 +663,7 @@
       yandexKey: "Yandex API key",
       yandexFolderId: "Yandex Folder ID",
       localBearer: "Local bearer token",
-      storedSecret: "Ключ сохранён",
+      storedSecret: "Введите новый ключ",
       optionalLocalServer: "Необязательно",
       system: "Система",
       config: "Конфиг",
@@ -566,6 +679,7 @@
       keySaved: "API-ключ сохранён.",
       keyRemoved: "API-ключ удалён.",
       backendOk: "Перевод работает.",
+      translationReady: "Перевод готов.",
       downloaded: "Готово",
       localRuntimeUnavailable: "Локальный переводчик не ответил. Waylate перезапустил его. Пожалуйста, попробуйте ещё раз.",
       quantization: "Версия",
@@ -582,11 +696,17 @@
       modelInstalledCold: "Модель установлена. Она загрузится в память при первом переводе.",
       modelInstalledWarm: "Модель установлена и уже загружена в память.",
       modelNeedsDownload: "Модель ещё не установлена. Скачайте её ниже.",
+      modelNeedsRetry: "Прошлое скачивание не завершилось. Скачайте модель ещё раз.",
       builtInModels: "Встроенные модели",
-      diagnosticsTitle: "Техническая диагностика",
-      diagnosticsHint: "Только для проверки окружения и ускорения. Обычному использованию эти детали не нужны.",
-      runtimeProbe: "Проверка локального перевода",
+      runtimeProbe: "Проверить перевод",
       modelDetails: "Подробности",
+      savedInSystem: "Сохранён в системе",
+      enterNewKey: "Введите новый ключ",
+      clearField: "Очистить поле",
+      partialDownload: "Скачать заново",
+      openModelFolder: "Открыть папку моделей",
+      openConfigFolder: "Открыть папку настроек",
+      sampleTranslation: "Пробный перевод",
     },
     sk: {
       translate: "Preložiť",
@@ -612,12 +732,11 @@
       comingSoon: "Už čoskoro",
       setupNeeded: "Treba nastaviť",
       onboardingTitle: "Lokálne nastavenie",
-      onboardingText: "Stiahni lokálny model raz. Potom preklad funguje offline.",
+      onboardingText: "Stiahnite lokálny model raz. Potom bude preklad fungovať offline.",
       download: "Stiahnuť",
       downloading: "Sťahuje sa",
       cancel: "Zrušiť",
       retry: "Skúsiť znova",
-      saveSettings: "Uložiť nastavenia",
       testBackend: "Otestovať preklad",
       modelPath: "Cesta modelu",
       tokenizer: "Tokenizer",
@@ -653,13 +772,13 @@
       saveHistory: "Ukladať históriu prekladov lokálne",
       autostart: "Spúšťať Waylate na pozadí",
       networkApis: "Povoliť sieťových API providerov",
-      apiKeysNote: "DeepL, Google a Yandex potrebujú tvoj kľúč.",
+      apiKeysNote: "DeepL, Google a Yandex potrebujú Váš kľúč.",
       deeplKey: "DeepL API key",
       googleKey: "Google API key",
       yandexKey: "Yandex API key",
       yandexFolderId: "Yandex Folder ID",
       localBearer: "Local bearer token",
-      storedSecret: "Kľúč uložený",
+      storedSecret: "Zadajte nový kľúč",
       optionalLocalServer: "Voliteľné",
       system: "Systém",
       config: "Konfig",
@@ -675,6 +794,7 @@
       keySaved: "API kľúč uložený.",
       keyRemoved: "API kľúč odstránený.",
       backendOk: "Preklad funguje.",
+      translationReady: "Preklad je pripravený.",
       downloaded: "Pripravené",
       localRuntimeUnavailable: "Lokálny prekladač neodpovedal. Waylate ho reštartoval. Skúste to prosím ešte raz.",
       quantization: "Verzia",
@@ -685,17 +805,23 @@
       diagnostics: "Diagnostika",
       activeRuntime: "Aktívny runtime",
       none: "Žiadny",
-      noModelsInstalled: "Zatiaľ nie je pripravený žiadny prekladový model. Stiahni model v nastaveniach.",
+      noModelsInstalled: "Zatiaľ nie je pripravený žiadny prekladový model. Stiahnite model v nastaveniach.",
       localModelReadyHint: "Tento model je pripravený na preklad.",
-      localModelMissingHint: "Tento model nie je nainštalovaný. Stiahni ho v nastaveniach.",
+      localModelMissingHint: "Tento model nie je nainštalovaný. Stiahnite ho v nastaveniach.",
       modelInstalledCold: "Model je nainštalovaný. Do pamäte sa načíta pri prvom preklade.",
       modelInstalledWarm: "Model je nainštalovaný a už je načítaný v pamäti.",
       modelNeedsDownload: "Model ešte nie je nainštalovaný. Stiahnite ho nižšie.",
+      modelNeedsRetry: "Predchádzajúce sťahovanie sa nedokončilo. Stiahnite model znova.",
       builtInModels: "Vstavané modely",
-      diagnosticsTitle: "Technická diagnostika",
-      diagnosticsHint: "Len na kontrolu prostredia a akcelerácie. Pri bežnom používaní tieto detaily netreba.",
       runtimeProbe: "Skontrolovať lokálny preklad",
       modelDetails: "Podrobnosti",
+      savedInSystem: "Uložené v systéme",
+      enterNewKey: "Zadajte nový kľúč",
+      clearField: "Vymazať pole",
+      partialDownload: "Stiahnuť znova",
+      openModelFolder: "Otvoriť priečinok modelov",
+      openConfigFolder: "Otvoriť priečinok nastavení",
+      sampleTranslation: "Skúšobný preklad",
     },
   } as const;
 
@@ -755,6 +881,12 @@
 
   async function refresh() {
     snapshot = await invoke<Snapshot>("get_snapshot");
+    modelProfiles = await invoke<ModelCatalogEntry[]>("list_model_profiles");
+    modelStatuses = Object.fromEntries(
+      await Promise.all(
+        modelProfiles.map(async (model) => [model.id, installStateKind(await invoke("get_model_status", { profileId: model.id }))]),
+      ),
+    );
     config = structuredClone(snapshot.config);
     configSignature = configStateSignature(snapshot.config);
     const available = availableTranslateModels(snapshot, config);
@@ -783,7 +915,7 @@
     if (!config) return;
     error = "";
     status = "";
-    translatedText = "";
+    probeResult = "";
     if (!sourceText.trim()) {
       error = t("nothingToTranslate");
       return;
@@ -795,7 +927,7 @@
     if (isLocalProfile(config.modelId)) {
       status = snapshot?.runtime.selectedModelLoaded ? t("runtimeLoaded") : t("loadingModel");
     }
-    busy = true;
+    translating = true;
     try {
       const response = await invoke<{ translatedText: string; providerLabel: string; warning?: string }>(
         "translate_text",
@@ -809,12 +941,12 @@
         },
       );
       translatedText = response.translatedText;
-      status = response.warning ?? `Translated with ${response.providerLabel}.`;
+      status = response.warning ?? t("translationReady");
       await refresh();
     } catch (err) {
       error = friendlyErrorMessage(err);
     } finally {
-      busy = false;
+      translating = false;
     }
   }
 
@@ -854,7 +986,8 @@
 
   function changeModel(modelId: string) {
     if (!config || !snapshot) return;
-    const nextModel = snapshot.catalog.find((model) => model.id === modelId);
+    const nextModel = modelProfiles.find((model) => model.id === modelId)
+      ?? snapshot.catalog.find((model) => model.id === modelId);
     if (!nextModel) return;
     config.modelId = modelId;
     config.sourceLang = closestLanguage(config.sourceLang, nextModel.languages, true);
@@ -870,14 +1003,14 @@
     return nextLanguages.find((language) => language.code !== "auto")?.code ?? current;
   }
 
-  async function saveKey(provider: string, value: string) {
+  async function saveKey(provider: SecretProvider, value: string) {
     error = "";
     try {
       await invoke("save_api_key", { provider, key: value });
-      deeplKey = "";
-      googleKey = "";
-      yandexKey = "";
-      localKey = "";
+      if (provider === "deepl") deeplKey = "";
+      if (provider === "google") googleKey = "";
+      if (provider === "yandex") yandexKey = "";
+      if (provider === "openai-compatible") localKey = "";
       await refresh();
       status = t("keySaved");
     } catch (err) {
@@ -885,10 +1018,14 @@
     }
   }
 
-  async function clearKey(provider: string) {
+  async function clearKey(provider: SecretProvider) {
     error = "";
     try {
       await invoke("clear_api_key", { provider });
+      if (provider === "deepl") deeplKey = "";
+      if (provider === "google") googleKey = "";
+      if (provider === "yandex") yandexKey = "";
+      if (provider === "openai-compatible") localKey = "";
       await refresh();
       status = t("keyRemoved");
     } catch (err) {
@@ -896,10 +1033,25 @@
     }
   }
 
+  function scheduleKeySave(provider: SecretProvider, value: string) {
+    if (secretSaveTimers[provider]) {
+      window.clearTimeout(secretSaveTimers[provider]);
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return;
+    }
+    secretSaveTimers[provider] = window.setTimeout(() => {
+      void saveKey(provider, trimmed);
+    }, 450);
+  }
+
   async function downloadModel(modelId: string) {
     if (!config) return;
-    busy = true;
+    downloading = true;
     error = "";
+    status = "";
+    probeResult = "";
     await persistConfig(false);
     downloadState = {
       modelId,
@@ -909,7 +1061,7 @@
       downloadedBytes: 0,
     };
     try {
-      const path = await invoke<string>("download_catalog_model", { modelId });
+      const path = await invoke<string>("install_model", { profileId: modelId });
       await refresh();
       downloadState = {
         modelId,
@@ -923,11 +1075,15 @@
     } catch (err) {
       error = friendlyErrorMessage(err);
     } finally {
-      busy = false;
+      downloading = false;
     }
   }
 
   async function cancelDownload() {
+    if (downloadState?.modelId) {
+      await invoke("cancel_model_install", { profileId: downloadState.modelId });
+      return;
+    }
     await invoke("cancel_model_download");
   }
 
@@ -935,10 +1091,11 @@
     if (!config) return;
     error = "";
     status = "";
-    busy = true;
+    probeResult = "";
+    testing = true;
     try {
       await persistConfig(false);
-      await invoke("translate_text", {
+      const response = await invoke<{ translatedText: string }>("translate_text", {
         request: {
           text: "Hello",
           sourceLang:
@@ -952,16 +1109,22 @@
         },
       });
       status = t("backendOk");
+      probeResult = response.translatedText;
       await refresh();
     } catch (err) {
       error = friendlyErrorMessage(err);
     } finally {
-      busy = false;
+      testing = false;
     }
   }
 
   async function clearLocalHistory() {
     await invoke("clear_history");
+    await refresh();
+  }
+
+  async function deleteHistoryEntry(id: number) {
+    await invoke("delete_history_entry", { id });
     await refresh();
   }
 
@@ -991,7 +1154,7 @@
   }
 
   function languageLabel(code: string) {
-    return languages.find((language) => language.code === code)?.name ?? code;
+    return displayLanguageName(code, languages);
   }
 
   function languageSearchText(language: Language) {
@@ -1009,20 +1172,45 @@
   }
 
   function isLocalProfile(modelId: string) {
-    const profile = snapshot?.catalog.find((item) => item.id === modelId);
-    if (profile?.provider === "c-translate2") return true;
-    if (profile?.provider === "custom") {
-      return profile.id !== "custom-local" || config?.customBackendMode === "managed-gguf";
+    const spec = modelProfiles.find(m => m.id === modelId);
+    if (spec) return true; // ONNX and GGUF are both local
+
+    const legacy = snapshot?.catalog.find((item) => item.id === modelId);
+    if (legacy?.provider === "c-translate2") return true;
+    if (legacy?.provider === "custom") {
+      return legacy.id !== "custom-local" || config?.customBackendMode === "managed-gguf";
     }
     return false;
   }
 
   function isCurrentModelReady() {
-    return Boolean(selectedModel && isModelInstalled(selectedModel.id));
+    return Boolean(selectedModel && (isModelInstalled(selectedModel.id) || hasInstalledModelFiles()));
   }
 
   function isModelInstalled(modelId: string) {
-    return snapshot?.installedModelIds.includes(modelId) ?? false;
+    return modelState(modelId) === "installed";
+  }
+
+  function modelState(modelId?: string) {
+    if (!modelId) return "missing";
+    return snapshot?.modelStates.find((item) => item.modelId === modelId)?.status ?? "missing";
+  }
+
+  function specModelState(modelId?: string) {
+    if (!modelId) return "missing";
+    const status = modelStatuses[modelId];
+    if (status === "ready") return "installed";
+    if (status === "failed") return "partial";
+    return "missing";
+  }
+
+  function installStateKind(raw: unknown) {
+    if (typeof raw === "string") return raw;
+    if (raw && typeof raw === "object") {
+      const [key] = Object.keys(raw);
+      return key ?? "notInstalled";
+    }
+    return "notInstalled";
   }
 
   function hasInstalledModelFiles() {
@@ -1056,6 +1244,9 @@
 
   function modelReadinessSummary() {
     if (!selectedModel) return t("modelNeedsDownload");
+    if (modelState(selectedModel.id) === "partial") {
+      return t("modelNeedsRetry");
+    }
     if (isModelInstalled(selectedModel.id)) {
       return snapshot?.runtime.selectedModelLoaded ? t("modelInstalledWarm") : t("modelInstalledCold");
     }
@@ -1063,22 +1254,33 @@
   }
 
   function localCatalogModels() {
-    return (
-      snapshot?.catalog.filter(
-        (model) =>
-          model.provider === "c-translate2" || (model.provider === "custom" && model.id !== "custom-local"),
-      ) ?? []
-    );
+    return builtInCatalogOrder
+      .map((id) => modelProfiles.find((model) => model.id === id) ?? fallbackCatalog.find((model) => model.id === id))
+      .filter((model): model is ModelCatalogEntry => Boolean(model));
   }
 
   function availableTranslateModels(currentSnapshot = snapshot, currentConfig = config) {
     if (!currentSnapshot) return [];
+
+    // Prioritize spec models from modelProfiles
+    const specModels = modelProfiles.filter(m => specModelState(m.id) === "installed");
+    if (specModels.length) return specModels;
+
+    // Fallback to legacy installed models
     const installed = new Set(currentSnapshot.installedModelIds);
-    const models = currentSnapshot.catalog.filter((model) => installed.has(model.id));
-    if (models.length) return models;
+    const legacyCatalog = currentSnapshot.catalog;
+    const readyLegacy = legacyCatalog.filter(m => installed.has(m.id));
+    if (readyLegacy.length) return readyLegacy;
+
+    // If nothing installed, at least show the selected model if it exists
     if (!currentConfig) return [];
-    const current = currentSnapshot.catalog.find((model) => model.id === currentConfig.modelId);
-    return current && installed.has(current.id) ? [current] : [];
+    const currentSpec = modelProfiles.find(m => m.id === currentConfig.modelId);
+    if (currentSpec) return [currentSpec];
+
+    const currentLegacy = legacyCatalog.find(m => m.id === currentConfig.modelId);
+    if (currentLegacy) return [currentLegacy];
+
+    return [];
   }
 
   function configStateSignature(next: AppConfig) {
@@ -1115,7 +1317,12 @@
       const saved = await invoke<AppConfig>("save_config", { next: config });
       config = saved;
       configSignature = configStateSignature(saved);
-      await refresh();
+      if (snapshot) {
+        snapshot = {
+          ...snapshot,
+          config: structuredClone(saved),
+        };
+      }
       if (showSavedStatus) {
         status = t("settingsSaved");
       }
@@ -1173,6 +1380,31 @@
     return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
   }
 
+  function modelDownloadSize(model: ModelCatalogEntry) {
+    return formatBytes(model.estimatedDownloadBytes);
+  }
+
+  function modelAudienceLabel(model: ModelCatalogEntry) {
+    if (model.audience === "beginner") {
+      if (uiLang === "ru") return "Рекомендуемая";
+      if (uiLang === "sk") return "Odporucane";
+      return "Recommended";
+    }
+    if (model.audience === "high-quality") {
+      if (uiLang === "ru") return "Качественная";
+      if (uiLang === "sk") return "Vyssia kvalita";
+      return "High quality";
+    }
+    if (uiLang === "ru") return "Для профи";
+    if (uiLang === "sk") return "Pre pokrocilych";
+    return "Pro";
+  }
+
+  function specModelDetail(model: ModelCatalogEntry) {
+    const parts = [modelAudienceLabel(model), model.license];
+    return parts.filter(Boolean).join(" · ");
+  }
+
   function friendlyErrorMessage(err: unknown) {
     const message = String(err);
     if (
@@ -1185,28 +1417,48 @@
     return message;
   }
 
-  function modelSummary(model: ModelProfile) {
+  function displayLanguageName(code: string, languageList: Language[] = snapshot?.catalog.flatMap((item) => item.languages) ?? []) {
+    return languageList.find((language) => language.code === code)?.name ?? code;
+  }
+
+  function historyLanguageLabel(code: string) {
+    return displayLanguageName(code);
+  }
+
+  function keyStateHint(hasKey: boolean) {
+    return hasKey ? t("savedInSystem") : "";
+  }
+
+  function modelPillLabel() {
+    if (!selectedModel) return t("download");
+    if (modelState(selectedModel.id) === "partial") return t("partialDownload");
+    if (isModelInstalled(selectedModel.id) || hasInstalledModelFiles()) return t("ready");
+    return t("download");
+  }
+
+  function canTranslate() {
+    return !translating && !testing && !downloading && selectableModels.length > 0;
+  }
+
+  function modelSummary(model: ModelProfile | ModelCatalogEntry) {
     if (uiLang !== "ru") return model.description;
     const summaries: Record<string, string> = {
-      "nllb-200-ct2": "Рекомендуемая первая локальная модель. После одного скачивания работает офлайн и поддерживает много языков.",
-      "opus-mt-en-ru": "Лёгкое семейство моделей для отдельных языковых пар, например английский -> русский.",
-      "tencent-hy-mt2-gguf": "Компактная многоязычная GGUF-модель. Качество выше, чем у самых маленьких моделей, при умеренном размере.",
-      "translategemma-4b-gguf": "Более качественная GGUF-модель для широких переводческих задач, если у компьютера достаточно памяти.",
-      "milmmt-46-1b-gguf": "Небольшая GGUF-модель с хорошим балансом размера и качества, в том числе для словацкого языка.",
+      "nllb-200-distilled-600m-onnx": "Рекомендуемая модель для старта. Работает быстро, поддерживает сотни языков и не требует GPU.",
+      "tencent-hy-mt2-1.8b-gguf": "Компактная многоязычная GGUF-модель. Высокое качество перевода при скромном размере.",
+      "translategemma-4b-gguf": "Качественная GGUF-модель от Google для мощных ПК. Пока в разработке.",
+      "milmmt-46-1b-gguf": "GGUF-модель с хорошим балансом размера и качества, включая словацкий язык.",
     };
     return summaries[model.id] ?? model.description;
   }
 
-  function modelDetail(model: ModelProfile) {
-    if (uiLang !== "ru") return model.engineHint;
+  function modelDetail(model: ModelProfile | ModelCatalogEntry) {
+    if (uiLang !== "ru") return ("engineHint" in model ? model.engineHint : "");
     const details: Record<string, string> = {
-      "nllb-200-ct2": "Waylate сам скачивает модель, подготавливает локальный runtime и использует её прямо внутри приложения.",
-      "opus-mt-en-ru": "Это семейство будет добавлено следующим. Пока оно показано в каталоге, но скачивание ещё не включено.",
-      "tencent-hy-mt2-gguf": "Waylate скачивает подготовленный GGUF-файл и запускает его через управляемый локальный runtime.",
-      "translategemma-4b-gguf": "Waylate скачивает подготовленный GGUF-файл и запускает его через управляемый локальный runtime.",
-      "milmmt-46-1b-gguf": "Waylate скачивает подготовленный GGUF-файл и запускает его через управляемый локальный runtime.",
+      "nllb-200-distilled-600m-onnx": "Запускается через встроенный ONNX Runtime. Максимальная стабильность и скорость.",
+      "tencent-hy-mt2-1.8b-gguf": "Запускается через встроенный llama-server. Требует GGUF файл.",
+      "milmmt-46-1b-gguf": "Запускается через встроенный llama-server. Требует GGUF файл.",
     };
-    return details[model.id] ?? model.engineHint;
+    return details[model.id] ?? ("engineHint" in model ? model.engineHint : "");
   }
 
 </script>
@@ -1234,142 +1486,144 @@
   <section class="workspace">
     {#if config && snapshot}
       {#if tab === "translate"}
-        <section class="toolbar" aria-label="Translation options">
-          <label>
-            {t("model")}
-            {#if selectableModels.length}
-              <select value={config.modelId} on:change={(event) => changeModel(event.currentTarget.value)}>
-                {#each selectableModels as model}
-                  <option value={model.id}>{model.name}</option>
-                {/each}
-              </select>
-            {:else}
-              <select disabled>
-                <option>{t("noModelsInstalled")}</option>
-              </select>
+        <section class="translate-view">
+          <section class="toolbar" aria-label="Translation options">
+            <label>
+              {t("model")}
+              {#if selectableModels.length}
+                <select value={config.modelId} on:change={(event) => changeModel(event.currentTarget.value)}>
+                  {#each selectableModels as model}
+                    <option value={model.id}>{model.name}</option>
+                  {/each}
+                </select>
+              {:else}
+                <select disabled>
+                  <option>{t("noModelsInstalled")}</option>
+                </select>
+              {/if}
+            </label>
+            <label class="combo-label">
+              {t("from")}
+              <div class="combo">
+                <button type="button" class="combo-button" on:click={() => (sourceLanguageOpen = !sourceLanguageOpen)}>
+                  <span>{languageLabel(config.sourceLang)}</span>
+                  <ChevronDown size={14} />
+                </button>
+                {#if sourceLanguageOpen}
+                  <div class="combo-menu">
+                    <input bind:value={sourceLanguageQuery} placeholder={t("searchLanguage")} />
+                    <div class="combo-options">
+                      {#each filteredLanguages(sourceLanguageQuery, true) as language}
+                        <button type="button" class:active={language.code === config.sourceLang} on:click={() => selectLanguage("source", language.code)}>
+                          <span>{language.name}</span>
+                        </button>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+              </div>
+            </label>
+            <button class="icon" title={t("swapLanguages")} on:click={swapLanguages} disabled={config.sourceLang === "auto"}>
+              <Repeat2 size={15} />
+            </button>
+            <label class="combo-label">
+              {t("to")}
+              <div class="combo">
+                <button type="button" class="combo-button" on:click={() => (targetLanguageOpen = !targetLanguageOpen)}>
+                  <span>{languageLabel(config.targetLang)}</span>
+                  <ChevronDown size={14} />
+                </button>
+                {#if targetLanguageOpen}
+                  <div class="combo-menu">
+                    <input bind:value={targetLanguageQuery} placeholder={t("searchLanguage")} />
+                    <div class="combo-options">
+                      {#each filteredLanguages(targetLanguageQuery, false) as language}
+                        <button type="button" class:active={language.code === config.targetLang} on:click={() => selectLanguage("target", language.code)}>
+                          <span>{language.name}</span>
+                        </button>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+              </div>
+            </label>
+            <button class="primary run" on:click={translate} disabled={!canTranslate()}>
+              <span class:spin={translating}><RefreshCw size={15} /></span> {t("translate")}
+            </button>
+            <div class="zoom-controls" aria-label="Interface zoom">
+              <button class="icon small" title="Zoom out" aria-label="Zoom out" on:click={() => setUiScale(uiScale - 0.1)}><ZoomOut size={13} /></button>
+              <button class="zoom-value" title="Reset zoom" on:click={() => setUiScale(1)}>{Math.round(uiScale * 100)}%</button>
+              <button class="icon small" title="Zoom in" aria-label="Zoom in" on:click={() => setUiScale(uiScale + 0.1)}><ZoomIn size={13} /></button>
+            </div>
+          </section>
+
+          <section class="translate-grid">
+            <div class="pane">
+              <div class="pane-head">
+                <span>{t("source")}</span>
+              </div>
+              <textarea bind:value={sourceText} spellcheck="false" placeholder={t("sourcePlaceholder")}></textarea>
+              <div class="pane-actions">
+                <button class="icon small" title={t("readSelection")} aria-label={t("readSelection")} on:click={pasteSelection}>
+                  <Languages size={13} />
+                </button>
+                <button class="icon small" title={t("pasteClipboard")} aria-label={t("pasteClipboard")} on:click={pasteClipboard}>
+                  <Clipboard size={13} />
+                </button>
+              </div>
+            </div>
+            <div class="pane">
+              <div class="pane-head">
+                <span>{t("translation")}</span>
+              </div>
+              <textarea bind:value={translatedText} spellcheck="false" readonly placeholder={t("translationPlaceholder")}></textarea>
+              <div class="pane-actions end">
+                <button class="icon small" title={t("copyTranslation")} aria-label={t("copyTranslation")} on:click={copyTranslation} disabled={!translatedText.trim()}>
+                  <Copy size={13} />
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section class="translate-footer">
+            <section class="model-note">
+              {#if selectableModels.length && selectedModel}
+                <strong>{selectedModel.name}</strong>
+                <span>{modelReadinessSummary()}</span>
+              {:else}
+                <strong>{t("onboardingTitle")}</strong>
+                <span>{t("noModelsInstalled")}</span>
+              {/if}
+            </section>
+            {#if status || error}
+              <p class:error-note={Boolean(error)} class="inline-note">{error || status}</p>
             {/if}
-          </label>
-          <label class="combo-label">
-            {t("from")}
-            <div class="combo">
-              <button type="button" class="combo-button" on:click={() => (sourceLanguageOpen = !sourceLanguageOpen)}>
-                <span>{languageLabel(config.sourceLang)}</span>
-                <ChevronDown size={14} />
-              </button>
-              {#if sourceLanguageOpen}
-                <div class="combo-menu">
-                  <input bind:value={sourceLanguageQuery} placeholder={t("searchLanguage")} />
-                  <div class="combo-options">
-                    {#each filteredLanguages(sourceLanguageQuery, true) as language}
-                      <button type="button" class:active={language.code === config.sourceLang} on:click={() => selectLanguage("source", language.code)}>
-                        <span>{language.name}</span>
-                        <small>{language.code}</small>
-                      </button>
-                    {/each}
-                  </div>
-                </div>
-              {/if}
-            </div>
-          </label>
-          <button class="icon" title={t("swapLanguages")} on:click={swapLanguages} disabled={config.sourceLang === "auto"}>
-            <Repeat2 size={15} />
-          </button>
-          <label class="combo-label">
-            {t("to")}
-            <div class="combo">
-              <button type="button" class="combo-button" on:click={() => (targetLanguageOpen = !targetLanguageOpen)}>
-                <span>{languageLabel(config.targetLang)}</span>
-                <ChevronDown size={14} />
-              </button>
-              {#if targetLanguageOpen}
-                <div class="combo-menu">
-                  <input bind:value={targetLanguageQuery} placeholder={t("searchLanguage")} />
-                  <div class="combo-options">
-                    {#each filteredLanguages(targetLanguageQuery, false) as language}
-                      <button type="button" class:active={language.code === config.targetLang} on:click={() => selectLanguage("target", language.code)}>
-                        <span>{language.name}</span>
-                        <small>{language.code}</small>
-                      </button>
-                    {/each}
-                  </div>
-                </div>
-              {/if}
-            </div>
-          </label>
-          <button class="primary run" on:click={translate} disabled={busy || !selectableModels.length}>
-            <span class:spin={busy}><RefreshCw size={15} /></span> {t("translate")}
-          </button>
-          <div class="zoom-controls" aria-label="Interface zoom">
-            <button class="icon small" title="Zoom out" aria-label="Zoom out" on:click={() => setUiScale(uiScale - 0.1)}><ZoomOut size={13} /></button>
-            <button class="zoom-value" title="Reset zoom" on:click={() => setUiScale(1)}>{Math.round(uiScale * 100)}%</button>
-            <button class="icon small" title="Zoom in" aria-label="Zoom in" on:click={() => setUiScale(uiScale + 0.1)}><ZoomIn size={13} /></button>
-          </div>
-        </section>
-
-        <section class="translate-grid">
-          <div class="pane">
-            <div class="pane-head">
-              <span>{t("source")}</span>
-            </div>
-            <textarea bind:value={sourceText} spellcheck="false" placeholder={t("sourcePlaceholder")}></textarea>
-            <div class="pane-actions">
-              <button class="icon small" title={t("readSelection")} aria-label={t("readSelection")} on:click={pasteSelection}>
-                <Languages size={13} />
-              </button>
-              <button class="icon small" title={t("pasteClipboard")} aria-label={t("pasteClipboard")} on:click={pasteClipboard}>
-                <Clipboard size={13} />
-              </button>
-            </div>
-          </div>
-          <div class="pane">
-            <div class="pane-head">
-              <span>{t("translation")}</span>
-            </div>
-            <textarea bind:value={translatedText} spellcheck="false" readonly placeholder={t("translationPlaceholder")}></textarea>
-            <div class="pane-actions end">
-              <button class="icon small" title={t("copyTranslation")} aria-label={t("copyTranslation")} on:click={copyTranslation} disabled={!translatedText.trim()}>
-                <Copy size={13} />
-              </button>
-            </div>
-          </div>
-        </section>
-
-        <section class="model-note">
-          {#if selectableModels.length && selectedModel}
-            <strong>{selectedModel.name}</strong>
-            <span>{selectedModel.description}</span>
-          {:else}
-            <strong>{t("onboardingTitle")}</strong>
-            <span>{t("noModelsInstalled")}</span>
-          {/if}
+          </section>
         </section>
       {:else if tab === "settings"}
         <section class="settings-grid">
           <div class="group">
             <div class="group-head">
               <h2>{t("localModel")}</h2>
-              {#if localModelReady}
-                <span class="pill ok"><CheckCircle2 size={13} /> {t("ready")}</span>
-              {:else}
-                <span class="pill">{t("setupNeeded")}</span>
-              {/if}
+              <span class="pill" class:ok={localModelReady}><CheckCircle2 size={13} /> {modelPillLabel()}</span>
             </div>
             <p class="muted">{localModelReady ? t("localModelReadyHint") : t("onboardingText")}</p>
             <p class="muted">{modelReadinessSummary()}</p>
             <h3>{t("builtInModels")}</h3>
             <div class="model-manager">
+              {#if curatedModels.length}
               {#each curatedModels as model}
                 <article class:active={config.modelId === model.id} class="model-card">
                   <div class="model-card-head">
                     <strong>{model.name}</strong>
-                    <span>{model.size}</span>
+                    <span>{modelDownloadSize(model)}</span>
                   </div>
-                  <p>{modelSummary(model)}</p>
-                  <p class="detail">{modelDetail(model)}</p>
+                  <p>{model.description}</p>
+                  <p class="detail">{specModelDetail(model)}</p>
                   <dl>
-                    <div><dt>{t("quantization")}</dt><dd>{model.quantization}</dd></div>
-                    <div><dt>{t("size")}</dt><dd>{model.size}</dd></div>
-                    <div><dt>{t("languages")}</dt><dd>{model.languages.length - 1}</dd></div>
+                    <div><dt>{t("size")}</dt><dd>{modelDownloadSize(model)}</dd></div>
+                    <div><dt>{t("languages")}</dt><dd>{model.languages.length}</dd></div>
+                    <div><dt>{t("modelDetails")}</dt><dd>{modelAudienceLabel(model)}</dd></div>
                   </dl>
                   {#if downloadState?.modelId === model.id && downloadState.status !== "done" && downloadState.status !== "cancelled"}
                     <div class="download-progress">
@@ -1380,21 +1634,26 @@
                       <progress max="1" value={downloadState.progress}></progress>
                       <button on:click={cancelDownload}>{t("cancel")}</button>
                     </div>
-                  {:else if isModelInstalled(model.id)}
+                  {:else if specModelState(model.id) === "installed"}
                     <button class="primary" disabled>
                       <CheckCircle2 size={16} /> {t("downloaded")}
+                    </button>
+                  {:else if specModelState(model.id) === "partial"}
+                    <button class="primary" on:click={() => downloadModel(model.id)} disabled={downloading || testing || translating}>
+                      <Download size={16} /> {t("partialDownload")}
                     </button>
                   {:else if !model.downloadable}
                     <button disabled>
                       {t("comingSoon")}
                     </button>
                   {:else}
-                    <button class="primary" on:click={() => downloadModel(model.id)} disabled={busy}>
+                    <button class="primary" on:click={() => downloadModel(model.id)} disabled={downloading || testing || translating}>
                       <Download size={16} /> {downloadState?.modelId === model.id && error ? t("retry") : t("download")}
                     </button>
                   {/if}
                 </article>
               {/each}
+              {/if}
             </div>
             <label>
               <span>{t("modelMemory")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "localModelPolicy")} on:mouseenter={() => showHelp("localModelPolicy")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "localModelPolicy"}<span class="help-popover">{help("localModelPolicy")}</span>{/if}</button></span>
@@ -1411,9 +1670,19 @@
                 <span class="range-value">{Math.max(1, Math.round(config.localModelIdleTimeoutSecs / 60))} {t("minutesShort")}</span>
               </div>
             </label>
-            <div class="actions">
-              <button on:click={testBackend} disabled={busy}><RefreshCw size={16} /> {t("runtimeProbe")}</button>
+            <div class="settings-actions">
+              <button on:click={testBackend} disabled={testing || downloading || translating || !hasInstalledModelFiles()}><span class:spin={testing}><RefreshCw size={16} /></span> {t("runtimeProbe")}</button>
+              <button on:click={revealModelsDir}><FolderOpen size={16} /> {t("openModelFolder")}</button>
+              <button on:click={revealConfigDir}><FolderOpen size={16} /> {t("openConfigFolder")}</button>
             </div>
+            {#if probeResult}
+              <div class="probe-result">
+                <strong>{t("sampleTranslation")}</strong>
+                <p>{probeResult}</p>
+              </div>
+            {:else if status || error}
+              <p class:error-note={Boolean(error)} class="inline-note">{error || status}</p>
+            {/if}
             <details>
               <summary>{t("advancedLocalBackend")}</summary>
               <label>
@@ -1508,62 +1777,53 @@
             </label>
             <p class="muted">{t("apiKeysNote")}</p>
             <label>
-              <span>{t("deeplKey")} {snapshot.hasDeeplKey ? "(saved)" : ""} <button type="button" class="help" on:click={(event) => toggleHelp(event, "deeplKey")} on:mouseenter={() => showHelp("deeplKey")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "deeplKey"}<span class="help-popover">{help("deeplKey")}</span>{/if}</button></span>
+              <span>{t("deeplKey")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "deeplKey")} on:mouseenter={() => showHelp("deeplKey")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "deeplKey"}<span class="help-popover">{help("deeplKey")}</span>{/if}</button></span>
               <div class="inline">
-                <input bind:value={deeplKey} type="password" placeholder={t("storedSecret")} />
-                <button on:click={() => saveKey("deepl", deeplKey)} disabled={!deeplKey}><Save size={15} /></button>
-                <button on:click={() => clearKey("deepl")}><Trash2 size={15} /></button>
+                <input bind:value={deeplKey} type="password" placeholder={t("storedSecret")} on:input={() => scheduleKeySave("deepl", deeplKey)} />
+                <button on:click={() => clearKey("deepl")} title={t("clearField")} aria-label={t("clearField")}><Trash2 size={15} /></button>
               </div>
+              {#if keyStateHint(snapshot.hasDeeplKey)}
+                <small class="field-hint">{keyStateHint(snapshot.hasDeeplKey)}</small>
+              {/if}
             </label>
             <label>
-              <span>{t("googleKey")} {snapshot.hasGoogleKey ? "(saved)" : ""} <button type="button" class="help" on:click={(event) => toggleHelp(event, "googleKey")} on:mouseenter={() => showHelp("googleKey")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "googleKey"}<span class="help-popover">{help("googleKey")}</span>{/if}</button></span>
+              <span>{t("googleKey")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "googleKey")} on:mouseenter={() => showHelp("googleKey")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "googleKey"}<span class="help-popover">{help("googleKey")}</span>{/if}</button></span>
               <div class="inline">
-                <input bind:value={googleKey} type="password" placeholder={t("storedSecret")} />
-                <button on:click={() => saveKey("google", googleKey)} disabled={!googleKey}><Save size={15} /></button>
-                <button on:click={() => clearKey("google")}><Trash2 size={15} /></button>
+                <input bind:value={googleKey} type="password" placeholder={t("storedSecret")} on:input={() => scheduleKeySave("google", googleKey)} />
+                <button on:click={() => clearKey("google")} title={t("clearField")} aria-label={t("clearField")}><Trash2 size={15} /></button>
               </div>
+              {#if keyStateHint(snapshot.hasGoogleKey)}
+                <small class="field-hint">{keyStateHint(snapshot.hasGoogleKey)}</small>
+              {/if}
             </label>
             <label>
-              <span>{t("yandexKey")} {snapshot.hasYandexKey ? "(saved)" : ""} <button type="button" class="help" on:click={(event) => toggleHelp(event, "yandexKey")} on:mouseenter={() => showHelp("yandexKey")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "yandexKey"}<span class="help-popover">{help("yandexKey")}</span>{/if}</button></span>
+              <span>{t("yandexKey")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "yandexKey")} on:mouseenter={() => showHelp("yandexKey")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "yandexKey"}<span class="help-popover">{help("yandexKey")}</span>{/if}</button></span>
               <div class="inline">
-                <input bind:value={yandexKey} type="password" placeholder={t("storedSecret")} />
-                <button on:click={() => saveKey("yandex", yandexKey)} disabled={!yandexKey}><Save size={15} /></button>
-                <button on:click={() => clearKey("yandex")}><Trash2 size={15} /></button>
+                <input bind:value={yandexKey} type="password" placeholder={t("storedSecret")} on:input={() => scheduleKeySave("yandex", yandexKey)} />
+                <button on:click={() => clearKey("yandex")} title={t("clearField")} aria-label={t("clearField")}><Trash2 size={15} /></button>
               </div>
+              {#if keyStateHint(snapshot.hasYandexKey)}
+                <small class="field-hint">{keyStateHint(snapshot.hasYandexKey)}</small>
+              {/if}
             </label>
             <label>
               <span>{t("yandexFolderId")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "yandexFolderId")} on:mouseenter={() => showHelp("yandexFolderId")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "yandexFolderId"}<span class="help-popover">{help("yandexFolderId")}</span>{/if}</button></span>
-              <input bind:value={config.yandexFolderId} placeholder="Folder ID" />
-            </label>
-            <label>
-              <span>{t("localBearer")} {snapshot.hasLocalKey ? "(saved)" : ""} <button type="button" class="help" on:click={(event) => toggleHelp(event, "localBearer")} on:mouseenter={() => showHelp("localBearer")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "localBearer"}<span class="help-popover">{help("localBearer")}</span>{/if}</button></span>
               <div class="inline">
-                <input bind:value={localKey} type="password" placeholder={t("optionalLocalServer")} />
-                <button on:click={() => saveKey("openai-compatible", localKey)} disabled={!localKey}><Save size={15} /></button>
-                <button on:click={() => clearKey("openai-compatible")}><Trash2 size={15} /></button>
+                <input bind:value={config.yandexFolderId} placeholder="Folder ID" />
+                <button on:click={() => config && (config.yandexFolderId = "")} title={t("clearField")} aria-label={t("clearField")}><Trash2 size={15} /></button>
               </div>
             </label>
+            <label>
+              <span>{t("localBearer")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "localBearer")} on:mouseenter={() => showHelp("localBearer")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "localBearer"}<span class="help-popover">{help("localBearer")}</span>{/if}</button></span>
+              <div class="inline">
+                <input bind:value={localKey} type="password" placeholder={t("optionalLocalServer")} on:input={() => scheduleKeySave("openai-compatible", localKey)} />
+                <button on:click={() => clearKey("openai-compatible")} title={t("clearField")} aria-label={t("clearField")}><Trash2 size={15} /></button>
+              </div>
+              {#if keyStateHint(snapshot.hasLocalKey)}
+                <small class="field-hint">{keyStateHint(snapshot.hasLocalKey)}</small>
+              {/if}
+            </label>
           </div>
-
-          <details class="group wide diagnostics-panel">
-            <summary>{t("diagnosticsTitle")}</summary>
-            <p class="muted">{t("diagnosticsHint")}</p>
-            <div class="facts">
-              <span class:ok={snapshot.environment.hasWlClipboard}>wl-clipboard</span>
-              <span class:ok={snapshot.environment.hasPython}>python3</span>
-              <span class="ok">HF HTTP</span>
-              <span class:ok={snapshot.environment.hasNvidiaSmi}>CUDA/NVIDIA</span>
-              <span class:ok={snapshot.environment.hasRocmSmi}>ROCm</span>
-              <span class:ok={snapshot.runtime.ct2CudaDevices > 0}>CT2 CUDA: {snapshot.runtime.ct2CudaDevices}</span>
-              <span class:ok={snapshot.runtime.llamaBinaryFound}>llama-server</span>
-              <span class:ok={snapshot.runtime.llamaCudaReported}>llama CUDA</span>
-              <span class:ok={snapshot.runtime.selectedModelLoaded}>{t("activeRuntime")}: {snapshot.runtime.selectedModelLoaded ? (snapshot.runtime.selectedDevice ?? t("runtimeLoaded")) : t("none")}</span>
-            </div>
-            <div class="actions">
-              <button on:click={revealConfigDir}><FolderOpen size={16} /> {t("config")}</button>
-              <button on:click={revealModelsDir}><FolderOpen size={16} /> {t("models")}</button>
-            </div>
-          </details>
         </section>
       {:else}
         <section class="history-list">
@@ -1578,7 +1838,12 @@
         {:else}
           {#each snapshot.history as item}
             <article>
-              <small>{item.sourceLang} -> {item.targetLang} / {item.modelId}</small>
+              <div class="history-item-head">
+                <small>{historyLanguageLabel(item.sourceLang)} -> {historyLanguageLabel(item.targetLang)}</small>
+                <button class="icon small" title={t("clearField")} aria-label={t("clearField")} on:click={() => deleteHistoryEntry(item.id)}>
+                  <Trash2 size={13} />
+                </button>
+              </div>
               <p>{item.sourceText}</p>
               <strong>{item.translatedText}</strong>
             </article>
@@ -1588,13 +1853,6 @@
       {/if}
     {:else}
       <section class="loading">{t("loading")}</section>
-    {/if}
-
-    {#if status}
-      <p class="status">{status}</p>
-    {/if}
-    {#if error}
-      <p class="error">{error}</p>
     {/if}
   </section>
 </main>
@@ -1658,7 +1916,7 @@
 
   :global(body) {
     margin: 0;
-    min-width: 680px;
+    min-width: 840px;
     color: var(--text);
     background: var(--bg);
     font-family:
@@ -1717,11 +1975,17 @@
   }
 
   .rail {
-    padding: 8px 6px;
+    width: 44px;
+    margin: 12px 0 12px 12px;
+    padding: 10px 6px;
     display: grid;
     grid-template-rows: 32px 1fr;
     gap: 10px;
-    border-right: 1px solid var(--border);
+    align-content: start;
+    align-self: start;
+    justify-items: center;
+    border: 1px solid var(--border);
+    border-radius: 10px;
     background: var(--surface);
   }
 
@@ -1755,6 +2019,8 @@
     display: grid;
     align-content: start;
     gap: 7px;
+    justify-items: center;
+    width: 100%;
   }
 
   nav button {
@@ -1774,18 +2040,27 @@
     min-width: 0;
     min-height: 0;
     display: grid;
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+    padding: 12px 12px 12px 8px;
+  }
+
+  .translate-view {
+    min-height: 0;
+    display: grid;
     grid-template-rows: auto minmax(0, 1fr) auto;
     overflow: hidden;
   }
 
   .toolbar {
     min-height: 52px;
-    padding: 8px 12px;
+    padding: 8px 12px 10px;
     display: grid;
     grid-template-columns: minmax(150px, 1.5fr) minmax(120px, 1fr) 30px minmax(120px, 1fr) auto auto;
     gap: 8px;
     align-items: end;
-    border-bottom: 1px solid var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px 8px 0 0;
     background: var(--surface-soft);
   }
 
@@ -1845,8 +2120,8 @@
   .help:hover,
   .help:focus-visible {
     color: var(--text);
-    border-color: var(--control-border);
-    background: var(--button-hover);
+    border-color: transparent;
+    background: transparent;
   }
 
   .help-popover {
@@ -1912,7 +2187,7 @@
   .combo-options button {
     width: 100%;
     min-height: 30px;
-    justify-content: space-between;
+    justify-content: flex-start;
     border-color: transparent;
     background: transparent;
   }
@@ -1921,11 +2196,6 @@
   .combo-options button.active {
     border-color: var(--border);
     background: var(--surface-soft);
-  }
-
-  .combo-options small {
-    color: var(--muted-text);
-    font-size: 11px;
   }
 
   input,
@@ -1976,10 +2246,11 @@
 
   .translate-grid {
     min-height: 0;
-    padding: 10px 12px 6px;
+    padding: 10px 0 0;
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 10px;
+    overflow: hidden;
   }
 
   .pane {
@@ -1988,6 +2259,10 @@
     display: grid;
     grid-template-rows: 24px minmax(0, 1fr) 28px;
     gap: 6px;
+    padding: 10px 12px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
   }
 
   .pane-head {
@@ -2002,11 +2277,16 @@
   }
 
   .pane-actions,
-  .actions,
   .inline {
     display: flex;
     gap: 6px;
     align-items: center;
+  }
+
+  .translate-footer {
+    padding: 10px 0 0;
+    display: grid;
+    gap: 8px;
   }
 
   .range-row {
@@ -2032,7 +2312,8 @@
   }
 
   .model-note {
-    margin: 0 12px 8px;
+    margin: 0;
+    padding: 10px 12px;
     display: flex;
     gap: 8px;
     align-items: center;
@@ -2040,6 +2321,9 @@
     font-size: 12px;
     white-space: nowrap;
     overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
   }
 
   .model-note span {
@@ -2049,7 +2333,7 @@
 
   .settings-grid {
     min-height: 0;
-    padding: 12px;
+    padding: 0;
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 12px;
@@ -2078,18 +2362,18 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    border: 1px solid var(--warn-border);
+    border: 1px solid var(--border);
     border-radius: 999px;
-    color: var(--warn-text);
-    background: var(--warn-bg);
+    color: var(--text);
+    background: var(--surface-soft);
     font-size: 11px;
     font-weight: 700;
   }
 
   .pill.ok {
-    color: var(--ok-text);
-    border-color: var(--ok-border);
-    background: var(--ok-bg);
+    color: var(--text);
+    border-color: var(--border);
+    background: var(--surface-soft);
   }
 
   h3 {
@@ -2218,10 +2502,6 @@
     margin-top: 10px;
   }
 
-  .group.wide {
-    grid-column: 1 / -1;
-  }
-
   h2 {
     margin: 0 0 2px;
     color: var(--text);
@@ -2243,28 +2523,50 @@
 
   .inline {
     display: grid;
-    grid-template-columns: 1fr 36px 36px;
+    grid-template-columns: 1fr 36px;
   }
 
-  .facts {
+  .field-hint {
+    color: var(--muted-text);
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .settings-actions {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 6px;
+    align-items: center;
   }
 
-  .facts span {
-    min-height: 28px;
-    padding: 5px 9px;
-    border: 1px solid var(--warn-border);
-    border-radius: 6px;
-    color: var(--warn-text);
-    background: var(--warn-bg);
+  .probe-result {
+    padding: 10px 12px;
+    display: grid;
+    gap: 6px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
   }
 
-  .facts span.ok {
-    color: var(--ok-text);
-    background: var(--ok-bg);
-    border-color: var(--ok-border);
+  .probe-result strong,
+  .probe-result p {
+    margin: 0;
+  }
+
+  .inline-note {
+    margin: 0;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    color: var(--text);
+    background: var(--surface-soft);
+    font-size: 12px;
+  }
+
+  .inline-note.error-note {
+    border-color: var(--border);
+    color: var(--text);
+    background: var(--surface-soft);
   }
 
   .history-list {
@@ -2280,6 +2582,13 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+  }
+
+  .history-item-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
   }
 
   article {
@@ -2299,24 +2608,6 @@
 
   article small {
     color: var(--muted-text);
-  }
-
-  .status,
-  .error {
-    margin: 0;
-    padding: 8px 18px;
-    font-size: 13px;
-    border-top: 1px solid var(--border);
-  }
-
-  .status {
-    color: var(--ok-text);
-    background: var(--ok-bg);
-  }
-
-  .error {
-    color: var(--warn-text);
-    background: var(--warn-bg);
   }
 
   .loading {
@@ -2352,7 +2643,7 @@
     .rail {
       grid-template-columns: 32px 1fr;
       grid-template-rows: 1fr;
-      border-right: 0;
+      margin: 8px;
       border-bottom: 1px solid var(--border);
     }
 

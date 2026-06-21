@@ -1,6 +1,6 @@
 use crate::{
     config::{AppConfig, AppPaths},
-    models::{catalog, ProviderKind},
+    models::{catalog, EngineKind, ModelCatalogEntry, ProviderKind},
     runtime::{self, RuntimeManager},
     secrets,
 };
@@ -35,6 +35,26 @@ pub fn translate(
         return Err("Nothing to translate".into());
     }
 
+    // New spec catalog takes priority — look up by EngineKind.
+    if let Some(entry) = crate::models::model_catalog()
+        .into_iter()
+        .find(|item| item.id == request.model_id)
+    {
+        return match entry.engine {
+            EngineKind::OnnxEncoderDecoder => Err(
+                "ONNX engine is not yet implemented. Download a GGUF model or wait for the next update.".into(),
+            ),
+            EngineKind::ManagedLlamaCpp => {
+                translate_spec_managed_llama(paths, runtime_manager, config, request, &entry)
+            }
+            EngineKind::OpenAiCompatible => translate_openai_compatible(config, request),
+            EngineKind::NetworkApi => {
+                Err("Network API models are not supported in the spec catalog path.".into())
+            }
+        };
+    }
+
+    // Legacy catalog fallback — CT2, network providers, custom-local.
     let profile = catalog()
         .into_iter()
         .find(|item| item.id == request.model_id)
@@ -48,6 +68,69 @@ pub fn translate(
         ProviderKind::Google => translate_google(config, request),
         ProviderKind::Yandex => translate_yandex(config, request),
     }
+}
+
+fn translate_spec_managed_llama(
+    paths: &AppPaths,
+    runtime_manager: &RuntimeManager,
+    config: &AppConfig,
+    request: &TranslationRequest,
+    entry: &ModelCatalogEntry,
+) -> Result<TranslationResponse, String> {
+    let model_path = resolve_spec_gguf_path(paths, entry)
+        .ok_or_else(|| "This model is not installed — Download it in Settings.".to_string())?;
+
+    let template = entry
+        .prompt_template
+        .as_deref()
+        .unwrap_or("Translate the following text from {source} to {target}. Return only the translation.\n\n{text}");
+
+    let prompt = template
+        .replace("{source}", &request.source_lang)
+        .replace("{target}", &request.target_lang)
+        .replace("{text}", &request.text);
+
+    let context_size = entry.min_ram_bytes.map(|_| 4096u32).unwrap_or(4096);
+
+    let (translated, device) = runtime::translate_via_spec_llama(
+        runtime_manager,
+        paths,
+        config,
+        &request.model_id,
+        &model_path,
+        context_size,
+        &entry.prompt_style,
+        &prompt,
+    )?;
+
+    Ok(TranslationResponse {
+        translated_text: translated,
+        provider_label: format!("Local GGUF ({})", device),
+        warning: None,
+    })
+}
+
+fn resolve_spec_gguf_path(paths: &crate::config::AppPaths, entry: &ModelCatalogEntry) -> Option<String> {
+    let dir = paths.models_dir.join(&entry.id);
+    // Check declared files first.
+    for file in &entry.files {
+        let p = dir.join(&file.destination);
+        if p.is_file() {
+            return Some(p.display().to_string());
+        }
+    }
+    // Fallback: any .gguf in the directory.
+    std::fs::read_dir(&dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("gguf"))
+                .unwrap_or(false)
+        })
+        .map(|p| p.display().to_string())
 }
 
 fn translate_openai_compatible(config: &AppConfig, request: &TranslationRequest) -> Result<TranslationResponse, String> {

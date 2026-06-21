@@ -9,14 +9,14 @@ mod translation;
 
 use chrono::Utc;
 use config::{AppConfig, AppPaths};
-use models::{ModelProfile, ProviderKind};
+use models::{InstallState, ModelCatalogEntry, ModelProfile, ProviderKind};
 use runtime::{RuntimeManager, RuntimeReport};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     fs::File,
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex},
     thread,
@@ -56,6 +56,7 @@ struct AppSnapshot {
     config: AppConfig,
     catalog: Vec<ModelProfile>,
     installed_model_ids: Vec<String>,
+    model_states: Vec<ModelInstallState>,
     history: Vec<history::HistoryEntry>,
     environment: EnvironmentReport,
     runtime: RuntimeReport,
@@ -100,6 +101,20 @@ struct DownloadProgress {
     total_bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ModelInstallState {
+    model_id: String,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InstallManifest {
+    version: u8,
+    repo: String,
+    files: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct HfFile {
     path: String,
@@ -110,6 +125,7 @@ struct HfFile {
 fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     let config = config::load(&state.paths)?;
     let catalog = models::catalog();
+    let model_states = collect_model_states(&state.paths, &config, &catalog);
     let entries = if config.history_enabled {
         history::list(&state.paths.history_db, 30)?
     } else {
@@ -117,7 +133,12 @@ fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     };
     Ok(AppSnapshot {
         config: config.clone(),
-        installed_model_ids: installed_model_ids(&state.paths, &config, &catalog),
+        installed_model_ids: model_states
+            .iter()
+            .filter(|state| state.status == "installed")
+            .map(|state| state.model_id.clone())
+            .collect(),
+        model_states,
         catalog,
         history: entries,
         environment: environment_report(&state.paths, &config),
@@ -133,6 +154,36 @@ fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
             history_db: state.paths.history_db.display().to_string(),
         },
     })
+}
+
+#[tauri::command]
+fn list_model_profiles() -> Vec<ModelCatalogEntry> {
+    models::model_catalog()
+}
+
+#[tauri::command]
+fn get_model_status(state: State<'_, AppState>, profile_id: String) -> Result<InstallState, String> {
+    let config = config::load(&state.paths)?;
+    let profile = models::model_catalog()
+        .into_iter()
+        .find(|item| item.id == profile_id)
+        .ok_or_else(|| "Unknown model profile".to_string())?;
+    let target = state.paths.models_dir.join(&profile.id);
+    if profile.files.is_empty() {
+        return Ok(InstallState::NotInstalled);
+    }
+    if has_spec_install_manifest(&target, &profile) {
+        return Ok(InstallState::Ready);
+    }
+    if spec_dir_has_partial_files(&target, &profile) {
+        return Ok(InstallState::Failed {
+            message: "Previous download did not finish.".into(),
+        });
+    }
+    if profile.engine == models::EngineKind::OpenAiCompatible && !config.openai_endpoint.trim().is_empty() {
+        return Ok(InstallState::Ready);
+    }
+    Ok(InstallState::NotInstalled)
 }
 
 #[tauri::command]
@@ -215,6 +266,11 @@ fn clear_history(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn delete_history_entry(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    history::delete(&state.paths.history_db, id)
+}
+
+#[tauri::command]
 fn reveal_path(path: String) -> Result<(), String> {
     opener::open(path).map_err(|err| err.to_string())
 }
@@ -224,6 +280,27 @@ fn cancel_model_download(state: State<'_, AppState>) -> Result<(), String> {
     let mut download = state.download.lock().map_err(|_| "Download state is poisoned")?;
     download.cancel_requested = true;
     Ok(())
+}
+
+#[tauri::command]
+fn cancel_model_install(state: State<'_, AppState>, profile_id: String) -> Result<(), String> {
+    let mut download = state.download.lock().map_err(|_| "Download state is poisoned")?;
+    if download.active_model.as_deref() == Some(profile_id.as_str()) {
+        download.cancel_requested = true;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn install_model(app: AppHandle, state: State<'_, AppState>, profile_id: String) -> Result<String, String> {
+    let profile = models::model_catalog()
+        .into_iter()
+        .find(|item| item.id == profile_id)
+        .ok_or_else(|| "Unknown model profile".to_string())?;
+    if !profile.downloadable {
+        return Err("This model is not ready for download yet.".into());
+    }
+    install_spec_model(app, state, profile).await
 }
 
 #[tauri::command]
@@ -265,6 +342,128 @@ async fn download_catalog_model(app: AppHandle, state: State<'_, AppState>, mode
     result
 }
 
+async fn install_spec_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile: ModelCatalogEntry,
+) -> Result<String, String> {
+    {
+        let mut download = state.download.lock().map_err(|_| "Download state is poisoned")?;
+        if download.active_model.is_some() {
+            return Err("Another model download is already running.".into());
+        }
+        download.active_model = Some(profile.id.clone());
+        download.cancel_requested = false;
+    }
+
+    let paths = state.paths.clone();
+    let app_for_download = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        download_spec_model_files(&app_for_download, &paths, &profile)
+    })
+    .await
+    .map_err(|err| err.to_string())?;
+
+    {
+        let mut download = state.download.lock().map_err(|_| "Download state is poisoned")?;
+        download.active_model = None;
+        download.cancel_requested = false;
+    }
+
+    result
+}
+
+fn download_spec_model_files(
+    app: &AppHandle,
+    paths: &AppPaths,
+    profile: &ModelCatalogEntry,
+) -> Result<String, String> {
+    if profile.files.is_empty() {
+        return Err("This model has no downloadable files yet.".into());
+    }
+
+    let target = paths.models_dir.join(&profile.id);
+    std::fs::create_dir_all(&target).map_err(|err| err.to_string())?;
+    clear_install_manifest(&target);
+
+    emit_download(app, &profile.id, "starting", "Checking files", 0.02, 0, Some(profile.estimated_download_bytes));
+
+    let client = reqwest::blocking::Client::new();
+    let mut downloaded = existing_spec_downloaded_bytes(&target, profile);
+    let total = if profile.estimated_download_bytes > 0 {
+        Some(profile.estimated_download_bytes)
+    } else {
+        None
+    };
+
+    for file in &profile.files {
+        if is_download_cancelled(app, &profile.id)? {
+            emit_download(app, &profile.id, "cancelled", "Download cancelled", 0.0, downloaded, total);
+            return Err("Download cancelled.".into());
+        }
+
+        let local_path = target.join(&file.destination);
+        if local_path.is_file() {
+            if let Some(expected) = file.size_bytes {
+                if local_path.metadata().map(|metadata| metadata.len()).unwrap_or_default() == expected {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        }
+        if let Some(parent) = local_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+
+        let url = format!("https://huggingface.co/{}/resolve/main/{}", file.repo, file.path);
+        let mut response = client
+            .get(url)
+            .send()
+            .map_err(|err| format!("Could not download {}: {err}", file.path))?
+            .error_for_status()
+            .map_err(|err| format!("Hugging Face returned an error for {}: {err}", file.path))?;
+        let part_path = local_path.with_extension(format!(
+            "{}part",
+            local_path.extension().and_then(|value| value.to_str()).map(|value| format!("{value}.")).unwrap_or_default()
+        ));
+        let mut output = File::create(&part_path)
+            .map_err(|err| format!("Could not create {}: {err}", local_path.display()))?;
+        let mut buffer = [0_u8; 128 * 1024];
+        loop {
+            if is_download_cancelled(app, &profile.id)? {
+                emit_download(app, &profile.id, "cancelled", "Download cancelled", 0.0, downloaded, total);
+                return Err("Download cancelled.".into());
+            }
+            let read = response
+                .read(&mut buffer)
+                .map_err(|err| format!("Could not read {}: {err}", file.path))?;
+            if read == 0 {
+                break;
+            }
+            output
+                .write_all(&buffer[..read])
+                .map_err(|err| format!("Could not write {}: {err}", local_path.display()))?;
+            downloaded += read as u64;
+            emit_download(
+                app,
+                &profile.id,
+                "downloading",
+                &file.destination,
+                download_ratio(downloaded, total),
+                downloaded,
+                total,
+            );
+        }
+        std::fs::rename(&part_path, &local_path)
+            .map_err(|err| format!("Could not finalize {}: {err}", local_path.display()))?;
+    }
+
+    write_spec_install_manifest(&target, profile)?;
+    emit_download(app, &profile.id, "done", "Ready", 1.0, downloaded, total);
+    Ok(target.display().to_string())
+}
+
 fn download_huggingface_repo(
     app: &AppHandle,
     paths: &AppPaths,
@@ -275,6 +474,7 @@ fn download_huggingface_repo(
 ) -> Result<String, String> {
     let target = paths.models_dir.join(&profile.id);
     std::fs::create_dir_all(&target).map_err(|err| err.to_string())?;
+    clear_install_manifest(&target);
     emit_download(
         app,
         &profile.id,
@@ -340,7 +540,11 @@ fn download_huggingface_repo(
             .map_err(|err| format!("Could not download {}: {err}", file.path))?
             .error_for_status()
             .map_err(|err| format!("Hugging Face returned an error for {}: {err}", file.path))?;
-        let mut output = File::create(&local_path)
+        let part_path = local_path.with_extension(format!(
+            "{}part",
+            local_path.extension().and_then(|value| value.to_str()).map(|value| format!("{value}.")).unwrap_or_default()
+        ));
+        let mut output = File::create(&part_path)
             .map_err(|err| format!("Could not create {}: {err}", local_path.display()))?;
         let mut buffer = [0_u8; 128 * 1024];
         let mut file_downloaded = 0_u64;
@@ -378,7 +582,11 @@ fn download_huggingface_repo(
                 ));
             }
         }
+        std::fs::rename(&part_path, &local_path)
+            .map_err(|err| format!("Could not finalize {}: {err}", local_path.display()))?;
     }
+
+    write_install_manifest(&target, repo, profile)?;
 
     config.model_id = profile.id.clone();
     match profile.provider {
@@ -559,8 +767,8 @@ fn show_window(app: &AppHandle, title: &str) -> Result<(), String> {
 
     WebviewWindowBuilder::new(app, "main", WebviewUrl::App("/".into()))
         .title(title)
-        .inner_size(900.0, 560.0)
-        .min_inner_size(680.0, 420.0)
+        .inner_size(1040.0, 720.0)
+        .min_inner_size(920.0, 620.0)
         .resizable(true)
         .visible(true)
         .build()
@@ -703,54 +911,191 @@ fn has_command(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn installed_model_ids(paths: &AppPaths, config: &AppConfig, catalog: &[ModelProfile]) -> Vec<String> {
-    let mut installed = Vec::new();
-    for profile in catalog {
-        let ready = match profile.provider {
-            ProviderKind::CTranslate2 => model_dir_has_files(&paths.models_dir.join(&profile.id)),
-            ProviderKind::Custom if profile.id != "custom-local" => {
-                model_dir_has_extension(&paths.models_dir.join(&profile.id), "gguf")
-            }
-            ProviderKind::Custom => {
-                if config.custom_backend_mode == "managed-gguf" {
-                    std::path::Path::new(config.custom_model_path.trim()).is_file()
-                } else {
-                    !config.openai_endpoint.trim().is_empty()
-                }
-            }
-            ProviderKind::DeepL => config.api_provider_enabled && secrets::has("deepl"),
-            ProviderKind::Google => config.api_provider_enabled && secrets::has("google"),
-            ProviderKind::Yandex => config.api_provider_enabled && secrets::has("yandex"),
-            ProviderKind::OpenAiCompatible => false,
-        };
-        if ready {
-            installed.push(profile.id.clone());
-        }
-    }
-    installed
+fn collect_model_states(paths: &AppPaths, config: &AppConfig, catalog: &[ModelProfile]) -> Vec<ModelInstallState> {
+    catalog
+        .iter()
+        .map(|profile| ModelInstallState {
+            model_id: profile.id.clone(),
+            status: install_status(paths, config, profile).into(),
+        })
+        .collect()
 }
 
-fn model_dir_has_files(path: &Path) -> bool {
+fn install_status(paths: &AppPaths, config: &AppConfig, profile: &ModelProfile) -> &'static str {
+    if profile.provider == ProviderKind::CTranslate2
+        || (profile.provider == ProviderKind::Custom && profile.id != "custom-local")
+    {
+        let target = paths.models_dir.join(&profile.id);
+        return catalog_install_status(&target, profile);
+    }
+
+    match profile.provider {
+        ProviderKind::Custom => {
+            if config.custom_backend_mode == "managed-gguf" {
+                if std::path::Path::new(config.custom_model_path.trim()).is_file() {
+                    "installed"
+                } else {
+                    "missing"
+                }
+            } else if !config.openai_endpoint.trim().is_empty() {
+                "installed"
+            } else {
+                "missing"
+            }
+        }
+        ProviderKind::DeepL => {
+            if config.api_provider_enabled && secrets::has("deepl") {
+                "installed"
+            } else {
+                "missing"
+            }
+        }
+        ProviderKind::Google => {
+            if config.api_provider_enabled && secrets::has("google") {
+                "installed"
+            } else {
+                "missing"
+            }
+        }
+        ProviderKind::Yandex => {
+            if config.api_provider_enabled && secrets::has("yandex") && !config.yandex_folder_id.trim().is_empty() {
+                "installed"
+            } else {
+                "missing"
+            }
+        }
+        ProviderKind::CTranslate2 => "missing",
+        ProviderKind::OpenAiCompatible => "missing",
+    }
+}
+
+fn catalog_install_status(path: &Path, profile: &ModelProfile) -> &'static str {
+    if has_valid_install_manifest(path, profile) || has_legacy_complete_install(path, profile) {
+        return "installed";
+    }
+    if dir_has_any_files(path) {
+        return "partial";
+    }
+    "missing"
+}
+
+fn dir_has_any_files(path: &Path) -> bool {
     std::fs::read_dir(path)
         .ok()
         .map(|mut entries| entries.any(|entry| entry.is_ok()))
         .unwrap_or(false)
 }
 
-fn model_dir_has_extension(path: &Path, extension: &str) -> bool {
-    std::fs::read_dir(path)
-        .ok()
-        .map(|entries| {
-            entries.filter_map(Result::ok).any(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .map(|value| value.eq_ignore_ascii_case(extension))
-                    .unwrap_or(false)
+fn has_valid_install_manifest(path: &Path, profile: &ModelProfile) -> bool {
+    let manifest_path = install_manifest_path(path);
+    let Ok(raw) = std::fs::read_to_string(&manifest_path) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_str::<InstallManifest>(&raw) else {
+        return false;
+    };
+    if manifest.version != 1 {
+        return false;
+    }
+    if manifest.files.is_empty() {
+        return false;
+    }
+    manifest
+        .files
+        .iter()
+        .all(|file| path.join(file).is_file())
+        && profile
+            .install_check_files
+            .iter()
+            .all(|file| path.join(file).exists())
+}
+
+fn has_legacy_complete_install(path: &Path, profile: &ModelProfile) -> bool {
+    if profile.install_check_files.is_empty() {
+        return dir_has_any_files(path);
+    }
+    profile
+        .install_check_files
+        .iter()
+        .all(|file| path.join(file).exists())
+}
+
+fn has_spec_install_manifest(path: &Path, profile: &ModelCatalogEntry) -> bool {
+    let Ok(raw) = std::fs::read_to_string(install_manifest_path(path)) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_str::<InstallManifest>(&raw) else {
+        return false;
+    };
+    if manifest.version != 1 || manifest.files.is_empty() {
+        return false;
+    }
+    profile.files.iter().all(|file| path.join(&file.destination).is_file())
+}
+
+fn spec_dir_has_partial_files(path: &Path, profile: &ModelCatalogEntry) -> bool {
+    profile.files.iter().any(|file| path.join(&file.destination).exists())
+        || dir_has_any_files(path)
+}
+
+fn install_manifest_path(path: &Path) -> PathBuf {
+    path.join(".waylate-complete.json")
+}
+
+fn clear_install_manifest(path: &Path) {
+    let _ = std::fs::remove_file(install_manifest_path(path));
+}
+
+fn write_install_manifest(path: &Path, repo: &str, profile: &ModelProfile) -> Result<(), String> {
+    let files = if profile.download_filenames.is_empty() {
+        std::fs::read_dir(path)
+            .map_err(|err| err.to_string())?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let entry_path = entry.path();
+                if !entry_path.is_file() {
+                    return None;
+                }
+                let name = entry.file_name();
+                let name = name.to_str()?;
+                if name == ".waylate-complete.json" || name.ends_with(".part") {
+                    return None;
+                }
+                Some(name.to_string())
             })
+            .collect::<Vec<_>>()
+    } else {
+        profile.download_filenames.clone()
+    };
+    let manifest = InstallManifest {
+        version: 1,
+        repo: repo.into(),
+        files,
+    };
+    let raw = serde_json::to_vec_pretty(&manifest).map_err(|err| err.to_string())?;
+    std::fs::write(install_manifest_path(path), raw).map_err(|err| err.to_string())
+}
+
+fn write_spec_install_manifest(path: &Path, profile: &ModelCatalogEntry) -> Result<(), String> {
+    let manifest = InstallManifest {
+        version: 1,
+        repo: "model-catalog-entry".into(),
+        files: profile.files.iter().map(|file| file.destination.clone()).collect(),
+    };
+    let raw = serde_json::to_vec_pretty(&manifest).map_err(|err| err.to_string())?;
+    std::fs::write(install_manifest_path(path), raw).map_err(|err| err.to_string())
+}
+
+fn existing_spec_downloaded_bytes(target: &Path, profile: &ModelCatalogEntry) -> u64 {
+    profile
+        .files
+        .iter()
+        .filter_map(|file| {
+            let expected = file.size_bytes?;
+            let actual = target.join(&file.destination).metadata().ok()?.len();
+            (actual == expected).then_some(actual)
         })
-        .unwrap_or(false)
+        .sum()
 }
 
 fn spawn_runtime_housekeeper(paths: AppPaths, runtime: Arc<RuntimeManager>) {
@@ -803,6 +1148,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            list_model_profiles,
+            install_model,
+            cancel_model_install,
+            get_model_status,
             save_config,
             translate_text,
             read_selection_text,
@@ -813,6 +1162,7 @@ pub fn run() {
             clear_api_key,
             get_history,
             clear_history,
+            delete_history_entry,
             reveal_path,
             download_catalog_model,
             cancel_model_download

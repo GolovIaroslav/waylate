@@ -91,3 +91,11 @@ pub fn clear(db_path: &Path) -> Result<(), String> {
         .map_err(|err| err.to_string())?;
     Ok(())
 }
+
+pub fn delete(db_path: &Path, id: i64) -> Result<(), String> {
+    init(db_path)?;
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    conn.execute("delete from translations where id = ?1", [id])
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}

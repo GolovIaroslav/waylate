@@ -257,8 +257,8 @@ impl RuntimeManager {
         if !model_path.trim().ends_with(".gguf") {
             return Err("Managed local mode currently supports GGUF files only.".into());
         }
-        let binary = resolve_llama_binary(config)
-            .ok_or_else(|| "Managed GGUF mode needs a llama-server binary in Advanced settings.".to_string())?;
+        let binary = ensure_managed_llama_binary(paths, config)
+            .map_err(|err| format!("Could not prepare llama-server: {err}"))?;
         let signature = format!(
             "{}|{}|{}|{}",
             binary,
@@ -674,11 +674,13 @@ pub fn translate_via_warm_ct2(
         Ok(value) => (value, endpoint.device.clone()),
         Err(_) => {
             let _ = manager.shutdown_profile(profile_id);
-            let restarted = manager.ensure_ct2_server(paths, config, profile_id)?;
-            (
-                warm_ct2_request(&restarted.endpoint, source, target, text)?,
-                restarted.device,
-            )
+            match manager.ensure_ct2_server(paths, config, profile_id) {
+                Ok(restarted) => match warm_ct2_request(&restarted.endpoint, source, target, text) {
+                    Ok(value) => (value, restarted.device),
+                    Err(_) => return translate_via_ct2_helper(paths, config, source, target, text),
+                },
+                Err(_) => return translate_via_ct2_helper(paths, config, source, target, text),
+            }
         }
     };
 
@@ -687,6 +689,56 @@ pub fn translate_via_warm_ct2(
         .and_then(Value::as_str)
         .ok_or_else(|| "Warm local runtime response did not contain a translation".to_string())?;
     Ok((translated.trim().into(), device))
+}
+
+fn translate_via_ct2_helper(
+    paths: &AppPaths,
+    config: &AppConfig,
+    source: &str,
+    target: &str,
+    text: &str,
+) -> Result<(String, String), String> {
+    let helper = if config.ct2_helper_command.trim().is_empty() {
+        ensure_ct2_runtime(paths)?
+    } else {
+        config.ct2_helper_command.trim().to_string()
+    };
+    let output = Command::new(&helper)
+        .arg("--model")
+        .arg(config.ct2_model_path.trim())
+        .arg("--tokenizer")
+        .arg(config.ct2_tokenizer_path.trim())
+        .arg("--source")
+        .arg(source)
+        .arg("--target")
+        .arg(target)
+        .arg("--device")
+        .arg(config.ct2_device.trim())
+        .arg(text)
+        .output()
+        .map_err(|err| format!("Could not start local translator helper: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "Local translator helper failed.".into()
+        } else {
+            stderr
+        });
+    }
+    let translated = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if translated.is_empty() {
+        return Err("Local translator helper returned an empty translation.".into());
+    }
+    let device = if config.ct2_device.trim() == "auto" {
+        if detect_ct2_cuda_devices(paths) > 0 {
+            "cuda".to_string()
+        } else {
+            "cpu".to_string()
+        }
+    } else {
+        config.ct2_device.trim().to_string()
+    };
+    Ok((translated, device))
 }
 
 fn warm_ct2_request(endpoint: &str, source: &str, target: &str, text: &str) -> Result<Value, String> {
@@ -764,6 +816,206 @@ pub fn translate_via_managed_llama(
     };
 
     Ok((translated, endpoint.device))
+}
+
+/// Translate a spec catalog GGUF model. Uses a pre-built prompt string (caller handles
+/// template substitution) and the model's declared PromptStyle.
+pub fn translate_via_spec_llama(
+    manager: &RuntimeManager,
+    paths: &AppPaths,
+    config: &AppConfig,
+    profile_id: &str,
+    model_path: &str,
+    context_size: u32,
+    prompt_style: &Option<crate::models::PromptStyle>,
+    prompt: &str,
+) -> Result<(String, String), String> {
+    let endpoint = manager.ensure_llama_server_with_model(paths, config, profile_id, model_path, context_size)?;
+    let is_completion = matches!(prompt_style, Some(crate::models::PromptStyle::Completion));
+    let translated = if is_completion {
+        let value: Value = Client::new()
+            .post(format!("{}/completion", endpoint.endpoint))
+            .json(&json!({"prompt": prompt, "temperature": 0.1, "n_predict": 400}))
+            .send()
+            .map_err(|err| format!("Local model could not process translation: {err}"))?
+            .error_for_status()
+            .map_err(|err| format!("Local model returned an error: {err}"))?
+            .json()
+            .map_err(|err| format!("Could not parse local model response: {err}"))?;
+        value
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Local model response did not contain completion text".to_string())?
+            .trim()
+            .to_string()
+    } else {
+        let value: Value = Client::new()
+            .post(format!("{}/v1/chat/completions", endpoint.endpoint))
+            .json(&json!({
+                "model": "managed-local-gguf",
+                "messages": [
+                    {"role": "system", "content": "You are a precise translation engine. Do not explain your answer."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.1,
+                "stream": false
+            }))
+            .send()
+            .map_err(|err| format!("Local model could not process translation: {err}"))?
+            .error_for_status()
+            .map_err(|err| format!("Local model returned an error: {err}"))?
+            .json()
+            .map_err(|err| format!("Could not parse local model response: {err}"))?;
+        value
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .or_else(|| value.pointer("/choices/0/text").and_then(Value::as_str))
+            .ok_or_else(|| "Local model response did not contain a translation".to_string())?
+            .trim()
+            .to_string()
+    };
+    Ok((translated, endpoint.device))
+}
+
+/// Pinned llama.cpp release used for the bundled llama-server.
+/// Update this constant when bumping the bundled runtime version.
+const LLAMA_SERVER_RELEASE: &str = "b5616";
+const LLAMA_SERVER_ZIP_URL: &str =
+    "https://github.com/ggerganov/llama.cpp/releases/download/b5616/llama-b5616-bin-ubuntu-x64.zip";
+/// Path inside the zip archive where `llama-server` lives.
+const LLAMA_SERVER_ZIP_ENTRY: &str = "build/bin/llama-server";
+
+/// Resolve a usable `llama-server` binary.
+///
+/// Priority:
+/// 1. Path configured in Advanced settings.
+/// 2. Waylate-managed download at `<data_dir>/runtime/llama-server-<release>`.
+/// 3. `llama-server` found in PATH.
+/// 4. Auto-download from the pinned release URL and install to (2).
+pub fn ensure_managed_llama_binary(paths: &AppPaths, config: &AppConfig) -> Result<String, String> {
+    // 1. User-configured path.
+    let configured = config.local_llama_server_path.trim();
+    if !configured.is_empty() {
+        if std::path::Path::new(configured).is_file() {
+            return Ok(configured.to_string());
+        }
+        return Err(format!(
+            "llama-server binary not found at configured path: {configured}"
+        ));
+    }
+
+    // 2. Managed download location.
+    let managed = paths
+        .data_dir
+        .join("runtime")
+        .join(format!("llama-server-{LLAMA_SERVER_RELEASE}"));
+    if managed.is_file() {
+        return Ok(managed.display().to_string());
+    }
+
+    // 3. System PATH.
+    if let Some(path_binary) = resolve_llama_binary_from_path() {
+        return Ok(path_binary);
+    }
+
+    // 4. Auto-download.
+    download_llama_server_binary(paths, &managed)
+}
+
+fn resolve_llama_binary_from_path() -> Option<String> {
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg("command -v llama-server")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?;
+    let path = path.trim();
+    if path.is_empty() { None } else { Some(path.into()) }
+}
+
+fn download_llama_server_binary(paths: &AppPaths, dest: &std::path::Path) -> Result<String, String> {
+    let runtime_dir = paths.data_dir.join("runtime");
+    fs::create_dir_all(&runtime_dir).map_err(|err| err.to_string())?;
+
+    let zip_path = runtime_dir.join(format!("llama-server-{LLAMA_SERVER_RELEASE}.zip"));
+
+    // Download the zip.
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|err| err.to_string())?;
+    let mut response = client
+        .get(LLAMA_SERVER_ZIP_URL)
+        .send()
+        .map_err(|err| format!("Could not download llama-server: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("llama-server download returned an error: {err}"))?;
+    let mut zip_file = File::create(&zip_path)
+        .map_err(|err| format!("Could not create zip file: {err}"))?;
+    std::io::copy(&mut response, &mut zip_file)
+        .map_err(|err| format!("Could not write zip file: {err}"))?;
+    drop(zip_file);
+
+    // Extract llama-server from the zip.
+    let zip_data = fs::read(&zip_path).map_err(|err| err.to_string())?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_data))
+        .map_err(|err| format!("Could not open zip: {err}"))?;
+    let entry_name = LLAMA_SERVER_ZIP_ENTRY;
+    let mut found = false;
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .map_err(|err| format!("Could not read zip entry: {err}"))?;
+        if file.name() == entry_name {
+            let mut out = File::create(dest)
+                .map_err(|err| format!("Could not create llama-server binary: {err}"))?;
+            std::io::copy(&mut file, &mut out)
+                .map_err(|err| format!("Could not extract llama-server: {err}"))?;
+            found = true;
+            break;
+        }
+    }
+    let _ = fs::remove_file(&zip_path);
+    if !found {
+        // Try alternate entry paths used in older releases (binary at root).
+        let zip_data2 = fs::read(&zip_path).unwrap_or_default();
+        if !zip_data2.is_empty() {
+            let mut archive2 = zip::ZipArchive::new(std::io::Cursor::new(zip_data2))
+                .map_err(|err| format!("Could not reopen zip: {err}"))?;
+            for i in 0..archive2.len() {
+                let mut file = archive2
+                    .by_index(i)
+                    .map_err(|err| format!("Could not read zip entry: {err}"))?;
+                let name = file.name().to_string();
+                if name.ends_with("llama-server") || name == "llama-server" {
+                    let mut out = File::create(dest)
+                        .map_err(|err| format!("Could not create llama-server binary: {err}"))?;
+                    std::io::copy(&mut file, &mut out)
+                        .map_err(|err| format!("Could not extract llama-server: {err}"))?;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            return Err(format!(
+                "llama-server not found inside the downloaded archive at '{entry_name}'. \
+                 The release format may have changed — set a custom path in Advanced settings."
+            ));
+        }
+    }
+
+    // Make the binary executable.
+    let mut perms = fs::metadata(dest)
+        .map_err(|err| err.to_string())?
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(dest, perms).map_err(|err| err.to_string())?;
+
+    Ok(dest.display().to_string())
 }
 
 #[cfg(test)]
