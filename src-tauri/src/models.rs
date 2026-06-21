@@ -198,7 +198,7 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
             license: "Gemma license".into(),
             license_url: "https://ai.google.dev/gemma/terms".into(),
             homepage: "https://huggingface.co/bullerwins/translategemma-4b-it-GGUF".into(),
-            description: "High-quality local model for machines with extra RAM (8 GB+) and disk space. Requires verification of the chat template before download is enabled.".into(),
+            description: "High-quality model for machines with 8 GB+ RAM.".into(),
             languages: languages.clone(),
             files: vec![model_file(
                 "bullerwins/translategemma-4b-it-GGUF",
@@ -211,7 +211,7 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
             estimated_download_bytes: 3 * 1024 * 1024 * 1024,
             estimated_disk_bytes: 3 * 1024 * 1024 * 1024,
             min_ram_bytes: Some(8 * 1024 * 1024 * 1024),
-            downloadable: false,
+            downloadable: true,
         },
         ModelCatalogEntry {
             id: "milmmt-46-1b-gguf".into(),

@@ -124,7 +124,14 @@ struct HfFile {
 #[tauri::command]
 fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     let config = config::load(&state.paths)?;
-    let catalog = models::catalog();
+    let mut catalog = models::catalog();
+    // For snapshot purposes, we bridge spec catalog models into the legacy ModelProfile list
+    // so the existing UI components can still render basic info.
+    for spec in models::model_catalog() {
+        if !catalog.iter().any(|p| p.id == spec.id) {
+            catalog.push(spec.into());
+        }
+    }
     let model_states = collect_model_states(&state.paths, &config, &catalog);
     let entries = if config.history_enabled {
         history::list(&state.paths.history_db, 30)?
@@ -970,13 +977,21 @@ fn install_status(paths: &AppPaths, config: &AppConfig, profile: &ModelProfile) 
 }
 
 fn catalog_install_status(path: &Path, profile: &ModelProfile) -> &'static str {
-    if has_valid_install_manifest(path, profile) || has_legacy_complete_install(path, profile) {
+    if has_valid_install_manifest(path, profile)
+        || has_valid_spec_install_manifest(path)
+        || has_legacy_complete_install(path, profile)
+    {
         return "installed";
     }
     if dir_has_any_files(path) {
         return "partial";
     }
     "missing"
+}
+
+fn has_valid_spec_install_manifest(path: &Path) -> bool {
+    let manifest_path = path.join(".waylate-spec-manifest.json");
+    manifest_path.is_file()
 }
 
 fn dir_has_any_files(path: &Path) -> bool {
