@@ -1610,9 +1610,7 @@ pub fn run() {
             let runtime = Arc::new(RuntimeManager::new());
             if let Ok(config) = config::load(&paths) {
                 let _ = autostart::sync(&paths, config.autostart);
-                if config.local_model_policy == "fast" {
-                    runtime.maybe_preload(&paths, &config);
-                }
+                runtime.maybe_preload(&paths, &config);
             }
             spawn_runtime_housekeeper(paths.clone(), runtime.clone());
             app.manage(AppState {

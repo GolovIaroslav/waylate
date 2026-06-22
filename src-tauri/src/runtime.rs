@@ -148,15 +148,22 @@ impl RuntimeManager {
     }
 
     pub fn maybe_preload(&self, paths: &AppPaths, config: &AppConfig) {
+        // ONNX models preload regardless of policy — they are the default beginner path.
+        if let Some(entry) = crate::models::model_catalog()
+            .into_iter()
+            .find(|e| e.id == config.model_id && e.engine == crate::models::EngineKind::OnnxEncoderDecoder)
+        {
+            let paths_clone = paths.clone();
+            thread::spawn(move || {
+                crate::engines::onnx_mt::preload(&entry, &paths_clone);
+            });
+            return;
+        }
+
         if config.local_model_policy != "fast" {
             return;
         }
         if let Some(profile) = crate::models::catalog().into_iter().find(|profile| {
-            profile.id == config.model_id
-                && profile.provider == crate::models::ProviderKind::CTranslate2
-        }) {
-            let _ = self.ensure_ct2_server(paths, config, &profile.id);
-        } else if let Some(profile) = crate::models::catalog().into_iter().find(|profile| {
             profile.id == config.model_id
                 && profile.id != "custom-local"
                 && profile.provider == crate::models::ProviderKind::Custom
@@ -348,6 +355,7 @@ impl RuntimeManager {
         self.touch(profile_id);
         if config.local_model_policy == "memory-saver" {
             let _ = self.shutdown_profile(profile_id);
+            crate::engines::onnx_mt::unload(profile_id);
         }
     }
 

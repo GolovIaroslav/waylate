@@ -3,7 +3,7 @@ use crate::{
     models::{EngineKind, ModelCatalogEntry},
 };
 use ort::{
-    session::Session,
+    session::{builder::GraphOptimizationLevel, Session},
     value::{DynTensor, Tensor, TensorElementType, ValueType},
 };
 use std::{
@@ -14,6 +14,31 @@ use std::{
 use tokenizers::Tokenizer;
 
 static MODEL_CACHE: OnceLock<Mutex<HashMap<String, LoadedOnnxModel>>> = OnceLock::new();
+
+/// Load the model into cache without translating — called in the background at startup
+/// so the first real translation doesn't pay the cold-load cost.
+pub fn preload(entry: &ModelCatalogEntry, paths: &AppPaths) {
+    let model_dir = paths.models_dir.join(&entry.id);
+    if !model_dir.is_dir() {
+        return;
+    }
+    let cache = MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut cache) = cache.lock() {
+        if !cache.contains_key(&entry.id) {
+            if let Ok(loaded) = LoadedOnnxModel::load(entry, &model_dir) {
+                cache.insert(entry.id.clone(), loaded);
+            }
+        }
+    }
+}
+
+pub fn unload(profile_id: &str) {
+    if let Some(cache) = MODEL_CACHE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            cache.remove(profile_id);
+        }
+    }
+}
 
 pub fn translate_with_progress(
     paths: &AppPaths,
@@ -27,7 +52,10 @@ pub fn translate_with_progress(
         return Err("Model is not backed by the ONNX engine.".into());
     }
     if source_lang == "auto" {
-        return Err("Choose the source language for local ONNX translation. Auto-detect is not available yet.".into());
+        return Err(
+            "Choose the source language for local ONNX translation. Auto-detect is not available yet."
+                .into(),
+        );
     }
 
     let model_dir = paths.models_dir.join(&entry.id);
@@ -81,12 +109,22 @@ impl LoadedOnnxModel {
 
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|err| format!("Could not load tokenizer for {}: {err}", entry.name))?;
+
+        let threads = intra_op_threads();
         let encoder = Session::builder()
             .map_err(|err| format!("Could not create ONNX encoder session: {err}"))?
+            .with_optimization_level(GraphOptimizationLevel::All)
+            .map_err(|err| format!("Could not set encoder optimization level: {err}"))?
+            .with_intra_threads(threads)
+            .map_err(|err| format!("Could not set encoder thread count: {err}"))?
             .commit_from_file(&encoder_path)
             .map_err(|err| format!("Could not load encoder model: {err}"))?;
         let decoder = Session::builder()
             .map_err(|err| format!("Could not create ONNX decoder session: {err}"))?
+            .with_optimization_level(GraphOptimizationLevel::All)
+            .map_err(|err| format!("Could not set decoder optimization level: {err}"))?
+            .with_intra_threads(threads)
+            .map_err(|err| format!("Could not set decoder thread count: {err}"))?
             .commit_from_file(&decoder_path)
             .map_err(|err| format!("Could not load decoder model: {err}"))?;
 
@@ -449,6 +487,12 @@ fn element_count(dims: &[usize]) -> usize {
     } else {
         dims.iter().product()
     }
+}
+
+fn intra_op_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().min(8))
+        .unwrap_or(4)
 }
 
 #[cfg(test)]
