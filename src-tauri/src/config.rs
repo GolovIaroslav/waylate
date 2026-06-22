@@ -104,8 +104,14 @@ impl AppPaths {
     }
 
     pub fn ensure(&self) -> Result<(), String> {
-        for path in [&self.config_dir, &self.data_dir, &self.cache_dir, &self.models_dir] {
-            fs::create_dir_all(path).map_err(|err| format!("Could not create {}: {err}", path.display()))?;
+        for path in [
+            &self.config_dir,
+            &self.data_dir,
+            &self.cache_dir,
+            &self.models_dir,
+        ] {
+            fs::create_dir_all(path)
+                .map_err(|err| format!("Could not create {}: {err}", path.display()))?;
         }
         Ok(())
     }
@@ -121,7 +127,12 @@ pub fn load(paths: &AppPaths) -> Result<AppConfig, String> {
 
     let raw = fs::read_to_string(&paths.config_file)
         .map_err(|err| format!("Could not read {}: {err}", paths.config_file.display()))?;
-    serde_json::from_str(&raw).map_err(|err| format!("Could not parse config: {err}"))
+    let mut config: AppConfig =
+        serde_json::from_str(&raw).map_err(|err| format!("Could not parse config: {err}"))?;
+    if migrate_legacy_model_selection(paths, &mut config) {
+        save(paths, &config)?;
+    }
+    Ok(config)
 }
 
 pub fn save(paths: &AppPaths, config: &AppConfig) -> Result<(), String> {
@@ -129,6 +140,32 @@ pub fn save(paths: &AppPaths, config: &AppConfig) -> Result<(), String> {
     let raw = serde_json::to_string_pretty(config).map_err(|err| err.to_string())?;
     fs::write(&paths.config_file, raw)
         .map_err(|err| format!("Could not write {}: {err}", paths.config_file.display()))
+}
+
+fn migrate_legacy_model_selection(paths: &AppPaths, config: &mut AppConfig) -> bool {
+    let previous = config.model_id.clone();
+    match config.model_id.as_str() {
+        "nllb-200-ct2" | "nllb-200-ct2-int8" => {
+            if spec_install_ready(paths, "nllb-200-distilled-600m-onnx") {
+                config.model_id = "nllb-200-distilled-600m-onnx".into();
+            }
+        }
+        "tencent-hy-mt2-gguf" => {
+            if spec_install_ready(paths, "tencent-hy-mt2-1.8b-gguf") {
+                config.model_id = "tencent-hy-mt2-1.8b-gguf".into();
+            }
+        }
+        _ => {}
+    }
+    config.model_id != previous
+}
+
+fn spec_install_ready(paths: &AppPaths, model_id: &str) -> bool {
+    paths
+        .models_dir
+        .join(model_id)
+        .join(".waylate-complete.json")
+        .is_file()
 }
 
 #[cfg(test)]
