@@ -124,9 +124,22 @@ fn translate_spec_managed_llama(
         .as_deref()
         .unwrap_or("Translate the following text from {source} to {target}. Return only the translation.\n\n{text}");
 
+        let source_name = entry
+            .languages
+            .iter()
+            .find(|l| l.ui_code == request.source_lang)
+            .and_then(|l| l.llm_language_name.as_deref())
+            .unwrap_or(&request.source_lang);
+        let target_name = entry
+            .languages
+            .iter()
+            .find(|l| l.ui_code == request.target_lang)
+            .and_then(|l| l.llm_language_name.as_deref())
+            .unwrap_or(&request.target_lang);
+
         let prompt = template
-            .replace("{source}", &request.source_lang)
-            .replace("{target}", &request.target_lang)
+            .replace("{source}", source_name)
+            .replace("{target}", target_name)
             .replace("{text}", &request.text);
 
         let context_size = entry.min_ram_bytes.map(|_| 4096u32).unwrap_or(4096);

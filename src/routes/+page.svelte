@@ -1478,7 +1478,7 @@
   function specModelDetail(model: ModelCatalogEntry) {
     const parts = [modelAudienceLabel(model), model.license];
     if (model.id === "translategemma-4b-gguf") {
-      parts.push(uiLang === "ru" ? "нужна acceptance лицензии Gemma" : uiLang === "sk" ? "vyzaduje prijatie licencie Gemma" : "Gemma license acceptance required");
+      parts.push(uiLang === "ru" ? "требуется принятие лицензии Gemma" : uiLang === "sk" ? "vyžaduje prijatie licencie Gemma" : "Gemma license acceptance required");
     }
     const warning = modelRamWarning(model);
     if (warning) parts.push(warning);
@@ -1537,7 +1537,7 @@
     const summaries: Record<string, string> = {
       "nllb-200-distilled-600m-onnx": "Рекомендуемая модель для старта. Работает быстро, поддерживает сотни языков и не требует GPU.",
       "tencent-hy-mt2-1.8b-gguf": "Компактная многоязычная GGUF-модель. Высокое качество перевода при скромном размере.",
-      "translategemma-4b-gguf": "Качественная GGUF-модель от Google для мощных ПК. Пока выключена: нужна acceptance лицензии Gemma.",
+      "translategemma-4b-gguf": "Качественная GGUF-модель от Google для мощных ПК. Пока выключена: требуется принятие лицензии Gemma.",
       "milmmt-46-1b-gguf": "GGUF-модель с хорошим балансом размера и качества, включая словацкий язык.",
     };
     return summaries[model.id] ?? model.description;
