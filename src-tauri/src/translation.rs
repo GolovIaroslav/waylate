@@ -76,7 +76,6 @@ pub fn translate_with_progress(
         ProviderKind::Custom => {
             translate_custom_local(paths, runtime_manager, config, request, &profile)
         }
-        ProviderKind::CTranslate2 => translate_ctranslate2(paths, runtime_manager, config, request),
         ProviderKind::DeepL => translate_deepl(config, request),
         ProviderKind::Google => translate_google(config, request),
         ProviderKind::Yandex => translate_yandex(config, request),
@@ -295,36 +294,6 @@ fn translate_catalog_managed_gguf(
         &request.target_lang,
         &request.text,
     )
-}
-
-fn translate_ctranslate2(
-    paths: &AppPaths,
-    runtime_manager: &RuntimeManager,
-    config: &AppConfig,
-    request: &TranslationRequest,
-) -> Result<TranslationResponse, String> {
-    if config.ct2_model_path.trim().is_empty() {
-        return Err("This model is not installed - Download it in Settings.".into());
-    }
-    if config.ct2_tokenizer_path.trim().is_empty() {
-        return Err("This model is not installed - Download it in Settings.".into());
-    }
-
-    let (translated, device) = runtime::translate_via_warm_ct2(
-        runtime_manager,
-        paths,
-        config,
-        &request.model_id,
-        &request.source_lang,
-        &request.target_lang,
-        &request.text,
-    )?;
-
-    Ok(TranslationResponse {
-        translated_text: translated,
-        provider_label: format!("Warm local NLLB ({device})"),
-        warning: None,
-    })
 }
 
 fn translate_deepl(

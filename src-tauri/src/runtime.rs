@@ -23,7 +23,6 @@ pub struct RuntimeReport {
     pub active_profiles: Vec<RuntimeEntry>,
     pub selected_model_loaded: bool,
     pub selected_device: Option<String>,
-    pub ct2_cuda_devices: u32,
     pub llama_binary_found: bool,
     pub llama_cuda_reported: bool,
 }
@@ -61,14 +60,12 @@ struct ManagedProcess {
 
 #[derive(Debug)]
 enum RuntimeKind {
-    Ct2Server,
     LlamaServer,
 }
 
 impl RuntimeKind {
     fn as_str(&self) -> &'static str {
         match self {
-            Self::Ct2Server => "ct2-server",
             Self::LlamaServer => "llama-server",
         }
     }
@@ -81,8 +78,7 @@ impl RuntimeManager {
         }
     }
 
-    pub fn report(&self, paths: &AppPaths, config: &AppConfig) -> RuntimeReport {
-        let ct2_cuda_devices = detect_ct2_cuda_devices(paths);
+    pub fn report(&self, config: &AppConfig) -> RuntimeReport {
         let llama_binary = resolve_llama_binary(config);
         let llama_cuda_reported = llama_binary
             .as_ref()
@@ -118,7 +114,6 @@ impl RuntimeManager {
             active_profiles,
             selected_model_loaded,
             selected_device,
-            ct2_cuda_devices,
             llama_binary_found: llama_binary.is_some(),
             llama_cuda_reported,
         }
@@ -175,62 +170,6 @@ impl RuntimeManager {
         }
     }
 
-    pub fn ensure_ct2_server(
-        &self,
-        paths: &AppPaths,
-        config: &AppConfig,
-        profile_id: &str,
-    ) -> Result<ManagedEndpoint, String> {
-        if config.ct2_model_path.trim().is_empty() || config.ct2_tokenizer_path.trim().is_empty() {
-            return Err("This model is not installed - Download it in Settings.".into());
-        }
-
-        let server = ensure_ct2_server_script(paths)?;
-        let signature = format!(
-            "{}|{}|{}",
-            config.ct2_model_path.trim(),
-            config.ct2_tokenizer_path.trim(),
-            config.ct2_device.trim()
-        );
-
-        if let Some(endpoint) = self.reuse_existing(profile_id, &signature) {
-            return Ok(endpoint);
-        }
-
-        let port = pick_free_port()?;
-        let endpoint = format!("http://127.0.0.1:{port}");
-        let log_path = runtime_log_path(paths, "ct2-server.log");
-        let logs = runtime_log_files_for_path(&log_path)?;
-        let mut child = Command::new(&server)
-            .arg("--model")
-            .arg(config.ct2_model_path.trim())
-            .arg("--tokenizer")
-            .arg(config.ct2_tokenizer_path.trim())
-            .arg("--device")
-            .arg(config.ct2_device.trim())
-            .arg("--host")
-            .arg("127.0.0.1")
-            .arg("--port")
-            .arg(port.to_string())
-            .stdout(Stdio::from(logs.0))
-            .stderr(Stdio::from(logs.1))
-            .spawn()
-            .map_err(|err| format!("Could not start warm local runtime: {err}"))?;
-
-        let device = wait_for_ct2_health(&mut child, &endpoint, &log_path)?;
-        let process = ManagedProcess {
-            child,
-            endpoint: endpoint.clone(),
-            profile_id: profile_id.into(),
-            kind: RuntimeKind::Ct2Server,
-            device_label: device.clone(),
-            last_used_at: Instant::now(),
-            signature,
-        };
-        self.insert_process(profile_id, process);
-        Ok(ManagedEndpoint { endpoint, device })
-    }
-
     pub fn ensure_llama_server(
         &self,
         paths: &AppPaths,
@@ -277,13 +216,7 @@ impl RuntimeManager {
         }
         let binary = ensure_managed_llama_binary(paths, config)
             .map_err(|err| format!("Could not prepare llama-server: {err}"))?;
-        let signature = format!(
-            "{}|{}|{}|{}",
-            binary,
-            model_path.trim(),
-            context_size,
-            config.ct2_device.trim()
-        );
+        let signature = format!("{}|{}|{}", binary, model_path.trim(), context_size);
 
         if let Some(endpoint) = self.reuse_existing(profile_id, &signature) {
             return Ok(endpoint);
@@ -310,10 +243,9 @@ impl RuntimeManager {
             .arg("--port")
             .arg(port.to_string())
             .arg("-c")
-            .arg(context_size.to_string());
-        if config.ct2_device.trim() != "cpu" {
-            command.arg("-ngl").arg("99");
-        }
+            .arg(context_size.to_string())
+            .arg("-ngl")
+            .arg("99");
         let log_path = runtime_log_path(paths, "llama-server.log");
         let logs = runtime_log_files_for_path(&log_path)?;
         let mut child = command
@@ -323,12 +255,10 @@ impl RuntimeManager {
             .map_err(|err| format!("Could not start managed GGUF runtime: {err}"))?;
 
         wait_for_http_health(&mut child, &endpoint, Duration::from_secs(60), &log_path)?;
-        let device = if config.ct2_device.trim() == "cpu" {
-            "cpu".to_string()
-        } else if llama_reports_cuda(&binary) {
+        let device = if llama_reports_cuda(&binary) {
             "cuda".to_string()
         } else {
-            "auto".to_string()
+            "cpu".to_string()
         };
         let process = ManagedProcess {
             child,
@@ -422,113 +352,6 @@ impl RuntimeManager {
             processes.insert(profile_id.into(), process);
         }
     }
-}
-
-pub fn ensure_ct2_runtime(paths: &AppPaths) -> Result<String, String> {
-    let runtime_dir = paths.data_dir.join("runtime");
-    let bin_dir = runtime_dir.join("bin");
-    let python = bin_dir.join("python");
-    let helper = runtime_dir.join("waylate-ct2-translate");
-    if !python.exists() {
-        fs::create_dir_all(&runtime_dir).map_err(|err| err.to_string())?;
-        let output = Command::new("python3")
-            .arg("-m")
-            .arg("venv")
-            .arg(&runtime_dir)
-            .output()
-            .map_err(|err| format!("Could not create local Python runtime: {err}"))?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-        }
-    }
-
-    let deps_ok = Command::new(&python)
-        .arg("-c")
-        .arg("import ctranslate2, transformers, sentencepiece")
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !deps_ok {
-        let output = Command::new(&python)
-            .arg("-m")
-            .arg("pip")
-            .arg("install")
-            .arg("--upgrade")
-            .arg("ctranslate2")
-            .arg("transformers")
-            .arg("sentencepiece")
-            .output()
-            .map_err(|err| format!("Could not install local translation runtime: {err}"))?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-        }
-    }
-
-    let source = include_str!("../../scripts/waylate-ct2-translate");
-    let body = source.lines().skip(1).collect::<Vec<_>>().join("\n");
-    fs::write(&helper, format!("#!{}\n{body}\n", python.display()))
-        .map_err(|err| format!("Could not write helper: {err}"))?;
-    let mut permissions = fs::metadata(&helper)
-        .map_err(|err| err.to_string())?
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&helper, permissions).map_err(|err| err.to_string())?;
-    Ok(helper.display().to_string())
-}
-
-fn ensure_ct2_server_script(paths: &AppPaths) -> Result<String, String> {
-    let runtime_dir = paths.data_dir.join("runtime");
-    let bin_dir = runtime_dir.join("bin");
-    let python = bin_dir.join("python");
-    let server = runtime_dir.join("waylate-ct2-server");
-    let _ = ensure_ct2_runtime(paths)?;
-    let source = include_str!("../../scripts/waylate-ct2-server");
-    let body = source.lines().skip(1).collect::<Vec<_>>().join("\n");
-    fs::write(&server, format!("#!{}\n{body}\n", python.display()))
-        .map_err(|err| format!("Could not write warm runtime server: {err}"))?;
-    let mut permissions = fs::metadata(&server)
-        .map_err(|err| err.to_string())?
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&server, permissions).map_err(|err| err.to_string())?;
-    Ok(server.display().to_string())
-}
-
-fn wait_for_ct2_health(
-    child: &mut Child,
-    endpoint: &str,
-    log_path: &Path,
-) -> Result<String, String> {
-    let client = Client::builder()
-        .timeout(Duration::from_millis(600))
-        .build()
-        .map_err(|err| err.to_string())?;
-    let health = format!("{endpoint}/health");
-    for _ in 0..120 {
-        if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
-            return Err(format!(
-                "Warm local runtime exited early with status {status}. See {}.",
-                log_path.display()
-            ));
-        }
-        if let Ok(response) = client.get(&health).send() {
-            if let Ok(response) = response.error_for_status() {
-                if let Ok(value) = response.json::<Value>() {
-                    let device = value
-                        .get("device")
-                        .and_then(Value::as_str)
-                        .unwrap_or("cpu")
-                        .to_string();
-                    return Ok(device);
-                }
-            }
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
-    Err(format!(
-        "Warm local runtime did not become ready in time. See {}.",
-        log_path.display()
-    ))
 }
 
 fn wait_for_http_health(
@@ -630,27 +453,6 @@ fn runtime_log_files_for_path(path: impl Into<PathBuf>) -> Result<(File, File), 
     Ok((stdout, stderr))
 }
 
-fn detect_ct2_cuda_devices(paths: &AppPaths) -> u32 {
-    let python = paths.data_dir.join("runtime").join("bin").join("python");
-    if !python.exists() {
-        return 0;
-    }
-    Command::new(python)
-        .arg("-c")
-        .arg("import ctranslate2; print(ctranslate2.get_cuda_device_count())")
-        .output()
-        .ok()
-        .and_then(|output| {
-            if output.status.success() {
-                String::from_utf8(output.stdout).ok()
-            } else {
-                None
-            }
-        })
-        .and_then(|value| value.trim().parse::<u32>().ok())
-        .unwrap_or(0)
-}
-
 fn resolve_llama_binary(config: &AppConfig) -> Option<String> {
     let configured = config.local_llama_server_path.trim();
     if !configured.is_empty() {
@@ -719,112 +521,6 @@ pub fn prompt_template(config: &AppConfig, source: &str, target: &str, text: &st
         .replace("{source}", source)
         .replace("{target}", target)
         .replace("{text}", text)
-}
-
-pub fn translate_via_warm_ct2(
-    manager: &RuntimeManager,
-    paths: &AppPaths,
-    config: &AppConfig,
-    profile_id: &str,
-    source: &str,
-    target: &str,
-    text: &str,
-) -> Result<(String, String), String> {
-    let endpoint = manager.ensure_ct2_server(paths, config, profile_id)?;
-    let (value, device) = match warm_ct2_request(&endpoint.endpoint, source, target, text) {
-        Ok(value) => (value, endpoint.device.clone()),
-        Err(_) => {
-            let _ = manager.shutdown_profile(profile_id);
-            match manager.ensure_ct2_server(paths, config, profile_id) {
-                Ok(restarted) => {
-                    match warm_ct2_request(&restarted.endpoint, source, target, text) {
-                        Ok(value) => (value, restarted.device),
-                        Err(_) => {
-                            return translate_via_ct2_helper(paths, config, source, target, text)
-                        }
-                    }
-                }
-                Err(_) => return translate_via_ct2_helper(paths, config, source, target, text),
-            }
-        }
-    };
-
-    let translated = value
-        .get("translatedText")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Warm local runtime response did not contain a translation".to_string())?;
-    Ok((translated.trim().into(), device))
-}
-
-fn translate_via_ct2_helper(
-    paths: &AppPaths,
-    config: &AppConfig,
-    source: &str,
-    target: &str,
-    text: &str,
-) -> Result<(String, String), String> {
-    let helper = if config.ct2_helper_command.trim().is_empty() {
-        ensure_ct2_runtime(paths)?
-    } else {
-        config.ct2_helper_command.trim().to_string()
-    };
-    let output = Command::new(&helper)
-        .arg("--model")
-        .arg(config.ct2_model_path.trim())
-        .arg("--tokenizer")
-        .arg(config.ct2_tokenizer_path.trim())
-        .arg("--source")
-        .arg(source)
-        .arg("--target")
-        .arg(target)
-        .arg("--device")
-        .arg(config.ct2_device.trim())
-        .arg(text)
-        .output()
-        .map_err(|err| format!("Could not start local translator helper: {err}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "Local translator helper failed.".into()
-        } else {
-            stderr
-        });
-    }
-    let translated = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if translated.is_empty() {
-        return Err("Local translator helper returned an empty translation.".into());
-    }
-    let device = if config.ct2_device.trim() == "auto" {
-        if detect_ct2_cuda_devices(paths) > 0 {
-            "cuda".to_string()
-        } else {
-            "cpu".to_string()
-        }
-    } else {
-        config.ct2_device.trim().to_string()
-    };
-    Ok((translated, device))
-}
-
-fn warm_ct2_request(
-    endpoint: &str,
-    source: &str,
-    target: &str,
-    text: &str,
-) -> Result<Value, String> {
-    Client::new()
-        .post(format!("{endpoint}/translate"))
-        .json(&json!({
-            "text": text,
-            "source": source,
-            "target": target,
-        }))
-        .send()
-        .map_err(|err| format!("Warm local runtime could not translate text: {err}"))?
-        .error_for_status()
-        .map_err(|err| format!("Warm local runtime returned an error: {err}"))?
-        .json()
-        .map_err(|err| format!("Could not parse warm local runtime response: {err}"))
 }
 
 pub fn translate_via_managed_llama(

@@ -143,7 +143,6 @@ pub struct ModelProfile {
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderKind {
     OpenAiCompatible,
-    CTranslate2,
     DeepL,
     Google,
     Yandex,
@@ -156,7 +155,7 @@ impl From<ModelCatalogEntry> for ModelProfile {
         let quantization = match entry.id.as_str() {
             "nllb-200-distilled-600m-onnx" => "INT8 ONNX",
             "opus-mt-marian-onnx" => "Pair-specific ONNX",
-            "tencent-hy-mt2-1.8b-gguf" => "1.25-bit GGUF",
+            "tencent-hy-mt2-1.8b-gguf" => "Q4_K_M GGUF",
             "translategemma-4b-gguf" => "Q4_K_M GGUF",
             "milmmt-46-1b-gguf" => "GGUF prep pending",
             _ => "Built-in",
@@ -175,7 +174,7 @@ impl From<ModelCatalogEntry> for ModelProfile {
             EngineKind::NetworkApi => "Uses a network translation API.".to_string(),
         };
         let provider = match entry.engine {
-            EngineKind::OnnxEncoderDecoder => ProviderKind::CTranslate2,
+            EngineKind::OnnxEncoderDecoder => ProviderKind::Custom,
             EngineKind::ManagedLlamaCpp => ProviderKind::Custom,
             EngineKind::OpenAiCompatible => ProviderKind::OpenAiCompatible,
             EngineKind::NetworkApi => ProviderKind::Custom,
@@ -339,73 +338,6 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
 
 pub fn catalog() -> Vec<ModelProfile> {
     vec![
-        ModelProfile {
-            id: "nllb-200-ct2".into(),
-            name: "NLLB-200".into(),
-            provider: ProviderKind::CTranslate2,
-            description: "Legacy CTranslate2 model entry (kept for existing installs). New users should use the ONNX engine.".into(),
-            quantization: "Balanced".into(),
-            size: "~2.4 GB".into(),
-            homepage: "https://huggingface.co/entai2965/nllb-200-distilled-600M-ctranslate2".into(),
-            engine_hint: "Legacy path. Replaced by the ONNX engine in new installs.".into(),
-            default_endpoint: None,
-            hf_repo: Some("entai2965/nllb-200-distilled-600M-ctranslate2".into()),
-            download_filenames: Vec::new(),
-            managed_prompt_style: None,
-            managed_prompt_template: None,
-            managed_context_size: None,
-            install_check_files: vec![
-                "config.json".into(),
-                "model.bin".into(),
-                "tokenizer.json".into(),
-                "tokenizer_config.json".into(),
-            ],
-            languages: nllb_languages(),
-            downloadable: false,
-        },
-        ModelProfile {
-            id: "nllb-200-ct2-int8".into(),
-            name: "NLLB-200 INT8".into(),
-            provider: ProviderKind::CTranslate2,
-            description: "Legacy CTranslate2 INT8 entry (kept for existing installs).".into(),
-            quantization: "INT8".into(),
-            size: "~1.3 GB".into(),
-            homepage: "https://huggingface.co/Tushe/nllb-200-600M-ct2-int8".into(),
-            engine_hint: "Legacy path. Replaced by the ONNX engine in new installs.".into(),
-            default_endpoint: None,
-            hf_repo: Some("Tushe/nllb-200-600M-ct2-int8".into()),
-            download_filenames: Vec::new(),
-            managed_prompt_style: None,
-            managed_prompt_template: None,
-            managed_context_size: None,
-            install_check_files: vec![
-                "config.json".into(),
-                "model.bin".into(),
-                "tokenizer.json".into(),
-                "tokenizer_config.json".into(),
-            ],
-            languages: nllb_languages(),
-            downloadable: false,
-        },
-        ModelProfile {
-            id: "opus-mt-en-ru".into(),
-            name: "OPUS-MT / Marian".into(),
-            provider: ProviderKind::CTranslate2,
-            description: "Lightweight model family for specific language pairs such as English to Russian.".into(),
-            quantization: "Pair-specific".into(),
-            size: "~300 MB".into(),
-            homepage: "https://huggingface.co/Helsinki-NLP/opus-mt-en-ru".into(),
-            engine_hint: "This family is planned next. It is listed here so the catalog shape is complete, but downloading is not enabled yet.".into(),
-            default_endpoint: None,
-            hf_repo: None,
-            download_filenames: Vec::new(),
-            managed_prompt_style: None,
-            managed_prompt_template: None,
-            managed_context_size: None,
-            install_check_files: Vec::new(),
-            languages: popular_languages(),
-            downloadable: false,
-        },
         ModelProfile {
             id: "tencent-hy-mt2-gguf".into(),
             name: "Tencent Hy-MT2 1.8B".into(),
@@ -665,30 +597,6 @@ fn tencent_languages() -> Vec<Language> {
     .collect()
 }
 
-fn nllb_languages() -> Vec<Language> {
-    [
-        ("auto", "Auto detect"),
-        ("eng_Latn", "English"),
-        ("rus_Cyrl", "Russian"),
-        ("slk_Latn", "Slovak"),
-        ("ces_Latn", "Czech"),
-        ("deu_Latn", "German"),
-        ("ukr_Cyrl", "Ukrainian"),
-        ("pol_Latn", "Polish"),
-        ("fra_Latn", "French"),
-        ("spa_Latn", "Spanish"),
-        ("ita_Latn", "Italian"),
-        ("por_Latn", "Portuguese"),
-        ("tur_Latn", "Turkish"),
-        ("zho_Hans", "Chinese Simplified"),
-        ("jpn_Jpan", "Japanese"),
-        ("kor_Hang", "Korean"),
-    ]
-    .into_iter()
-    .map(lang)
-    .collect()
-}
-
 fn lang((code, name): (&str, &str)) -> Language {
     Language {
         code: code.into(),
@@ -701,27 +609,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_contains_local_profiles_first() {
+    fn catalog_contains_legacy_profiles() {
         let catalog = catalog();
-        assert_eq!(catalog[0].id, "nllb-200-ct2");
-        assert!(catalog.iter().any(|profile| profile.id == "nllb-200-ct2"));
         assert!(catalog.iter().any(|profile| profile.id == "custom-local"));
-    }
-
-    #[test]
-    fn nllb_profile_uses_nllb_language_codes() {
-        let profile = catalog()
-            .into_iter()
-            .find(|profile| profile.id == "nllb-200-ct2")
-            .expect("nllb profile exists");
-        assert!(profile
-            .languages
-            .iter()
-            .any(|language| language.code == "eng_Latn"));
-        assert!(profile
-            .languages
-            .iter()
-            .any(|language| language.code == "rus_Cyrl"));
+        assert!(catalog.iter().any(|profile| profile.id == "deepl-api"));
+        assert!(!catalog.iter().any(|profile| profile.id.contains("ct2")));
     }
 
     #[test]

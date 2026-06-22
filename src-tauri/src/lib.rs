@@ -80,7 +80,6 @@ struct EnvironmentReport {
     has_nvidia_smi: bool,
     has_rocm_smi: bool,
     has_llama_server: bool,
-    ct2_cuda_devices: u32,
     llama_cuda_reported: bool,
     total_memory_bytes: Option<u64>,
 }
@@ -161,7 +160,7 @@ fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
         catalog,
         history: entries,
         environment: environment_report(&state.paths, &config),
-        runtime: state.runtime.report(&state.paths, &config),
+        runtime: state.runtime.report(&config),
         has_deepl_key: secrets::has("deepl"),
         has_google_key: secrets::has("google"),
         has_yandex_key: secrets::has("yandex"),
@@ -334,7 +333,7 @@ fn reveal_path(path: String) -> Result<(), String> {
 #[tauri::command]
 fn read_runtime_log(state: State<'_, AppState>, name: String) -> Result<String, String> {
     let file_name = match name.as_str() {
-        "ct2-server.log" | "llama-server.log" => name,
+        "llama-server.log" => name,
         _ => return Err("Unknown runtime log.".into()),
     };
     let path = runtime::runtime_log_path(&state.paths, &file_name);
@@ -811,26 +810,6 @@ fn download_huggingface_repo(
 
     config.model_id = profile.id.clone();
     match profile.provider {
-        ProviderKind::CTranslate2 => {
-            emit_download(
-                app,
-                &profile.id,
-                "preparing",
-                "Preparing translator",
-                0.98,
-                downloaded,
-                total,
-            );
-            let helper = runtime::ensure_ct2_runtime(paths)?;
-            config.ct2_model_path = target.display().to_string();
-            config.ct2_tokenizer_path = target.display().to_string();
-            config.source_lang = "auto".into();
-            config.target_lang = "eng_Latn".into();
-            config.ct2_helper_command = helper;
-            if config.ct2_device.trim().is_empty() {
-                config.ct2_device = "auto".into();
-            }
-        }
         ProviderKind::Custom if profile.id != "custom-local" => {
             config.custom_backend_mode = "managed-gguf".into();
             config.openai_model = profile.name.clone();
@@ -854,8 +833,8 @@ fn download_huggingface_repo(
     }
     config::save(paths, &config)?;
     if config.local_model_policy == "fast"
-        && (profile.provider == ProviderKind::CTranslate2
-            || (profile.provider == ProviderKind::Custom && profile.id != "custom-local"))
+        && profile.provider == ProviderKind::Custom
+        && profile.id != "custom-local"
     {
         emit_download(
             app,
@@ -866,11 +845,7 @@ fn download_huggingface_repo(
             downloaded,
             total,
         );
-        if profile.provider == ProviderKind::CTranslate2 {
-            let _ = runtime.ensure_ct2_server(paths, &config, &profile.id);
-        } else {
-            let _ = runtime.ensure_catalog_llama_server(paths, &config, profile, &profile.id);
-        }
+        let _ = runtime.ensure_catalog_llama_server(paths, &config, profile, &profile.id);
     }
 
     emit_download(app, &profile.id, "done", "Ready", 1.0, downloaded, total);
@@ -1202,8 +1177,8 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn environment_report(paths: &AppPaths, config: &AppConfig) -> EnvironmentReport {
-    let runtime_report = RuntimeManager::new().report(paths, config);
+fn environment_report(_paths: &AppPaths, config: &AppConfig) -> EnvironmentReport {
+    let runtime_report = RuntimeManager::new().report(config);
     EnvironmentReport {
         desktop: std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
         session_type: std::env::var("XDG_SESSION_TYPE").unwrap_or_default(),
@@ -1212,7 +1187,6 @@ fn environment_report(paths: &AppPaths, config: &AppConfig) -> EnvironmentReport
         has_nvidia_smi: has_command("nvidia-smi"),
         has_rocm_smi: has_command("rocm-smi"),
         has_llama_server: runtime_report.llama_binary_found,
-        ct2_cuda_devices: runtime_report.ct2_cuda_devices,
         llama_cuda_reported: runtime_report.llama_cuda_reported,
         total_memory_bytes: system_total_memory_bytes(),
     }
@@ -1258,9 +1232,7 @@ fn install_status(paths: &AppPaths, config: &AppConfig, profile: &ModelProfile) 
     {
         return spec_install_status(paths, config, &spec);
     }
-    if profile.provider == ProviderKind::CTranslate2
-        || (profile.provider == ProviderKind::Custom && profile.id != "custom-local")
-    {
+    if profile.provider == ProviderKind::Custom && profile.id != "custom-local" {
         let target = paths.models_dir.join(&profile.id);
         return catalog_install_status(&target, profile);
     }
@@ -1303,7 +1275,6 @@ fn install_status(paths: &AppPaths, config: &AppConfig, profile: &ModelProfile) 
                 "missing"
             }
         }
-        ProviderKind::CTranslate2 => "missing",
         ProviderKind::OpenAiCompatible => "missing",
     }
 }

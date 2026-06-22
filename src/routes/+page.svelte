@@ -115,10 +115,6 @@
     localPromptStyle: string;
     localPromptTemplate: string;
     localContextSize: number;
-    ct2ModelPath: string;
-    ct2TokenizerPath: string;
-    ct2HelperCommand: string;
-    ct2Device: string;
     apiProviderEnabled: boolean;
     yandexFolderId: string;
     uiLanguage: string;
@@ -149,7 +145,6 @@
       hasNvidiaSmi: boolean;
       hasRocmSmi: boolean;
       hasLlamaServer: boolean;
-      ct2CudaDevices: number;
       llamaCudaReported: boolean;
       totalMemoryBytes?: number;
     };
@@ -162,7 +157,6 @@
       }[];
       selectedModelLoaded: boolean;
       selectedDevice?: string;
-      ct2CudaDevices: number;
       llamaBinaryFound: boolean;
       llamaCudaReported: boolean;
     };
@@ -381,26 +375,6 @@
       ru: "Имя модели для ручной настройки.",
       sk: "Názov modelu pre ručné nastavenie.",
     },
-    ct2ModelPath: {
-      en: "Filled after download.",
-      ru: "Заполняется после скачивания.",
-      sk: "Vyplní sa po stiahnutí.",
-    },
-    ct2TokenizerPath: {
-      en: "Filled after download.",
-      ru: "Заполняется после скачивания.",
-      sk: "Vyplní sa po stiahnutí.",
-    },
-    ct2HelperCommand: {
-      en: "Filled after download.",
-      ru: "Заполняется после скачивания.",
-      sk: "Vyplní sa po stiahnutí.",
-    },
-    device: {
-      en: "auto tries CUDA when CTranslate2 sees a CUDA device, otherwise CPU. CUDA is faster but uses VRAM while translating.",
-      ru: "auto пробует CUDA, если CTranslate2 видит CUDA-устройство, иначе CPU. CUDA быстрее, но во время перевода занимает VRAM.",
-      sk: "auto skúsi CUDA, keď CTranslate2 vidí CUDA zariadenie, inak CPU. CUDA je rýchlejšia, ale počas prekladu používa VRAM.",
-    },
     localModelPolicy: {
       en: "Balanced keeps the model warm for a while, Fast preloads it, Memory saver unloads it after each translation.",
       ru: "Стандартно держит модель в памяти ещё некоторое время. Быстрый старт загружает её заранее. Экономия памяти выгружает модель после каждого перевода.",
@@ -547,9 +521,6 @@
       contextSize: "Context size",
       chatStyle: "Chat",
       completionStyle: "Completion",
-      ct2ModelPath: "Model folder",
-      tokenizerPath: "Tokenizer folder",
-      helperCommand: "Translator helper",
       privacyApis: "Privacy and APIs",
       interfaceLanguage: "Interface language",
       theme: "Theme",
@@ -668,9 +639,6 @@
       contextSize: "Размер контекста",
       chatStyle: "Chat",
       completionStyle: "Completion",
-      ct2ModelPath: "Папка модели",
-      tokenizerPath: "Папка tokenizer",
-      helperCommand: "Локальный helper",
       privacyApis: "Приватность и API",
       interfaceLanguage: "Язык интерфейса",
       theme: "Тема",
@@ -789,9 +757,6 @@
       contextSize: "Veľkosť kontextu",
       chatStyle: "Chat",
       completionStyle: "Completion",
-      ct2ModelPath: "Priečinok modelu",
-      tokenizerPath: "Priečinok tokenizeru",
-      helperCommand: "Pomocník prekladu",
       privacyApis: "Súkromie a API",
       interfaceLanguage: "Jazyk rozhrania",
       theme: "Téma",
@@ -1278,7 +1243,7 @@
 
   function modelUsesNllbCodes(model: TranslateModel | undefined | null) {
     if (!model) return false;
-    if ("provider" in model) return model.provider === "c-translate2";
+    if ("provider" in model) return false;
     return model.engine === "onnx-encoder-decoder" && model.id.startsWith("nllb-");
   }
 
@@ -1287,7 +1252,6 @@
     if (spec) return true; // ONNX and GGUF are both local
 
     const legacy = snapshot?.catalog.find((item) => item.id === modelId);
-    if (legacy?.provider === "c-translate2") return true;
     if (legacy?.provider === "custom") {
       return legacy.id !== "custom-local" || config?.customBackendMode === "managed-gguf";
     }
@@ -1329,9 +1293,6 @@
     if (!("provider" in selectedModel)) {
       return specModelState(selectedModel.id) === "installed" || isModelInstalled(selectedModel.id);
     }
-    if (modelUsesNllbCodes(selectedModel)) {
-      return Boolean(config?.ct2ModelPath && config?.ct2TokenizerPath);
-    }
     if (modelProvider(selectedModel) === "custom" && selectedModel.id !== "custom-local") {
       return isModelInstalled(selectedModel.id);
     }
@@ -1346,9 +1307,6 @@
     if (!("provider" in selectedModel)) {
       return specModelState(selectedModel.id) === "installed" || isModelInstalled(selectedModel.id);
     }
-    if (modelUsesNllbCodes(selectedModel)) {
-      return Boolean(config?.ct2TokenizerPath);
-    }
     if (modelProvider(selectedModel) === "custom") {
       return hasInstalledModelFiles();
     }
@@ -1356,7 +1314,7 @@
   }
 
   function needsPythonRuntime() {
-    return Boolean(selectedModel && "provider" in selectedModel && modelUsesNllbCodes(selectedModel));
+    return false;
   }
 
   function modelReadinessSummary() {
@@ -1835,7 +1793,6 @@
               <summary>{t("diagnostics")}</summary>
               <div class="settings-actions">
                 <button on:click={() => loadRuntimeLog("llama-server.log")} disabled={runtimeLogLoading}>llama-server.log</button>
-                <button on:click={() => loadRuntimeLog("ct2-server.log")} disabled={runtimeLogLoading}>ct2-server.log</button>
               </div>
               <strong>{t("recentLog")}: {runtimeLogName}</strong>
               <pre class="runtime-log">{runtimeLogText || t("noRuntimeLog")}</pre>
@@ -1879,26 +1836,6 @@
               <label>
                 <span>{t("promptTemplate")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "localPromptTemplate")} on:mouseenter={() => showHelp("localPromptTemplate")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "localPromptTemplate"}<span class="help-popover">{help("localPromptTemplate")}</span>{/if}</button></span>
                 <textarea class="prompt-template" bind:value={config.localPromptTemplate} rows="4"></textarea>
-              </label>
-              <label>
-                <span>{t("ct2ModelPath")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "ct2ModelPath")} on:mouseenter={() => showHelp("ct2ModelPath")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "ct2ModelPath"}<span class="help-popover">{help("ct2ModelPath")}</span>{/if}</button></span>
-                <input bind:value={config.ct2ModelPath} placeholder="/home/user/.local/share/Waylate/models/nllb-200-ct2" />
-              </label>
-              <label>
-                <span>{t("tokenizerPath")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "ct2TokenizerPath")} on:mouseenter={() => showHelp("ct2TokenizerPath")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "ct2TokenizerPath"}<span class="help-popover">{help("ct2TokenizerPath")}</span>{/if}</button></span>
-                <input bind:value={config.ct2TokenizerPath} placeholder="same as model path" />
-              </label>
-              <label>
-                <span>{t("helperCommand")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "ct2HelperCommand")} on:mouseenter={() => showHelp("ct2HelperCommand")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "ct2HelperCommand"}<span class="help-popover">{help("ct2HelperCommand")}</span>{/if}</button></span>
-                <input bind:value={config.ct2HelperCommand} placeholder="waylate-ct2-translate" />
-              </label>
-              <label>
-                <span>{t("device")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "device")} on:mouseenter={() => showHelp("device")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "device"}<span class="help-popover">{help("device")}</span>{/if}</button></span>
-                <select bind:value={config.ct2Device}>
-                  <option value="auto">auto</option>
-                  <option value="cuda">cuda</option>
-                  <option value="cpu">cpu</option>
-                </select>
               </label>
             </details>
           </div>

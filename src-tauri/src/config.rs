@@ -31,10 +31,6 @@ pub struct AppConfig {
     pub local_prompt_style: String,
     pub local_prompt_template: String,
     pub local_context_size: u32,
-    pub ct2_model_path: String,
-    pub ct2_tokenizer_path: String,
-    pub ct2_helper_command: String,
-    pub ct2_device: String,
     pub api_provider_enabled: bool,
     pub yandex_folder_id: String,
     pub ui_language: String,
@@ -60,10 +56,6 @@ impl Default for AppConfig {
             local_prompt_style: "chat".into(),
             local_prompt_template: "Translate the following text from {source} to {target}. Return only the translation.\n\n{text}".into(),
             local_context_size: 4096,
-            ct2_model_path: String::new(),
-            ct2_tokenizer_path: String::new(),
-            ct2_helper_command: "waylate-ct2-translate".into(),
-            ct2_device: "auto".into(),
             api_provider_enabled: false,
             yandex_folder_id: String::new(),
             ui_language: "en".into(),
@@ -142,31 +134,20 @@ pub fn save(paths: &AppPaths, config: &AppConfig) -> Result<(), String> {
         .map_err(|err| format!("Could not write {}: {err}", paths.config_file.display()))
 }
 
-fn migrate_legacy_model_selection(paths: &AppPaths, config: &mut AppConfig) -> bool {
+fn migrate_legacy_model_selection(_paths: &AppPaths, config: &mut AppConfig) -> bool {
     let previous = config.model_id.clone();
     match config.model_id.as_str() {
         "nllb-200-ct2" | "nllb-200-ct2-int8" => {
-            if spec_install_ready(paths, "nllb-200-distilled-600m-onnx") {
-                config.model_id = "nllb-200-distilled-600m-onnx".into();
-            }
+            config.model_id = "nllb-200-distilled-600m-onnx".into();
         }
         "tencent-hy-mt2-gguf" => {
-            if spec_install_ready(paths, "tencent-hy-mt2-1.8b-gguf") {
-                config.model_id = "tencent-hy-mt2-1.8b-gguf".into();
-            }
+            config.model_id = "tencent-hy-mt2-1.8b-gguf".into();
         }
         _ => {}
     }
     config.model_id != previous
 }
 
-fn spec_install_ready(paths: &AppPaths, model_id: &str) -> bool {
-    paths
-        .models_dir
-        .join(model_id)
-        .join(".waylate-complete.json")
-        .is_file()
-}
 
 #[cfg(test)]
 mod tests {
@@ -183,7 +164,6 @@ mod tests {
         assert_eq!(config.local_model_idle_timeout_secs, 600);
         assert_eq!(config.custom_backend_mode, "external-openai");
         assert_eq!(config.local_context_size, 4096);
-        assert_eq!(config.ct2_helper_command, "waylate-ct2-translate");
         assert!(config.installed_models.is_empty());
     }
 
@@ -195,7 +175,6 @@ mod tests {
         assert_eq!(config.openai_endpoint, AppConfig::default().openai_endpoint);
         assert_eq!(config.local_model_policy, "balanced");
         assert_eq!(config.custom_backend_mode, "external-openai");
-        assert_eq!(config.ct2_helper_command, "waylate-ct2-translate");
         assert!(config.installed_models.is_empty());
     }
 }
