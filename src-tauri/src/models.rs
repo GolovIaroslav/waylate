@@ -62,6 +62,7 @@ pub struct ModelCatalogEntry {
     pub homepage: String,
     pub description: String,
     pub languages: Vec<LanguageCode>,
+    pub actual_language_count: Option<u32>,
     pub files: Vec<ModelFile>,
     pub prompt_style: Option<PromptStyle>,
     pub prompt_template: Option<String>,
@@ -224,24 +225,22 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
             homepage: "https://huggingface.co/facebook/nllb-200-distilled-600M".into(),
             description: "Recommended broad-coverage local model. Downloads once and then works offline.".into(),
             languages: languages.clone(),
+            actual_language_count: Some(200),
             files: vec![
                 model_file(
                     "Xenova/nllb-200-distilled-600M",
                     "onnx/encoder_model_quantized.onnx",
                     "encoder_model_quantized.onnx",
                 )
-                .with_size(419_120_483)
-                .with_sha256("2d291e975e27a76ab0a786e49148ca46b8177ffee21429941309f92016c300e3"),
+                .with_size(419_120_483),
                 model_file(
                     "Xenova/nllb-200-distilled-600M",
                     "onnx/decoder_model_merged_quantized.onnx",
                     "decoder_model_merged_quantized.onnx",
                 )
-                .with_size(475_505_771)
-                .with_sha256("3656bd87027534fc2a906966c02ab6fd08ba3d9b75cf87b18d1bb77d22799a54"),
+                .with_size(475_505_771),
                 model_file("Xenova/nllb-200-distilled-600M", "tokenizer.json", "tokenizer.json")
-                    .with_size(17_331_224)
-                    .with_sha256("18761a875b5fe0e2091fe1af33c9d084902f95f0a38d4cdb1d2fa411850a95dd"),
+                    .with_size(17_331_224),
             ],
             prompt_style: None,
             prompt_template: None,
@@ -258,8 +257,9 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
             license: "CC-BY-NC-4.0".into(),
             license_url: "https://creativecommons.org/licenses/by-nc/4.0/".into(),
             homepage: "https://huggingface.co/facebook/nllb-200-distilled-1.3B".into(),
-            description: "Higher-quality NLLB variant. Same 200 languages, better translation. Needs ~4 GB RAM.".into(),
+            description: "Higher-quality NLLB variant. Same 200 languages, better translation. Needs ~4 GB RAM. Requires a free Hugging Face account token to download.".into(),
             languages: languages.clone(),
+            actual_language_count: Some(200),
             files: vec![
                 model_file(
                     "Xenova/nllb-200-distilled-1.3B",
@@ -278,7 +278,7 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
             estimated_download_bytes: 1_950_000_000,
             estimated_disk_bytes: 1_950_000_000,
             min_ram_bytes: Some(4 * 1024 * 1024 * 1024),
-            downloadable: true,
+            downloadable: false,
         },
         ModelCatalogEntry {
             id: "opus-mt-marian-onnx".into(),
@@ -290,6 +290,7 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
             homepage: "https://huggingface.co/Helsinki-NLP".into(),
             description: "Lightweight models for specific popular language pairs.".into(),
             languages: languages.clone(),
+            actual_language_count: None,
             files: Vec::new(),
             prompt_style: None,
             prompt_template: None,
@@ -305,16 +306,16 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
             audience: Audience::HighQuality,
             license: "Apache-2.0".into(),
             license_url: "https://raw.githubusercontent.com/Tencent-Hunyuan/Hy-MT2/main/LICENSE.txt".into(),
-            homepage: "https://huggingface.co/tencent/Hy-MT2-1.8B-1.25Bit-GGUF".into(),
-            description: "Compact high-quality local GGUF translation model.".into(),
+            homepage: "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF".into(),
+            description: "Compact high-quality local GGUF translation model. 131 languages.".into(),
             languages: languages.clone(),
+            actual_language_count: Some(131),
             files: vec![model_file(
                 "tencent/Hy-MT2-1.8B-GGUF",
                 "Hy-MT2-1.8B-Q4_K_M.gguf",
                 "Hy-MT2-1.8B-Q4_K_M.gguf",
             )
-            .with_size(1_133_080_448)
-            .with_sha256("a7725d3b0b25dd12b87709a4ef9a4faa70e80d23de3d190661f3d01439b11e0c")],
+            .with_size(1_133_080_448)],
             prompt_style: Some(PromptStyle::Chat),
             prompt_template: Some("Translate the following text from {source} to {target}. Return only the translation.\n\n{text}".into()),
             estimated_download_bytes: 1_133_080_448,
@@ -332,13 +333,13 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
             homepage: "https://huggingface.co/bullerwins/translategemma-4b-it-GGUF".into(),
             description: "High-quality model for machines with 8 GB+ RAM.".into(),
             languages: languages.clone(),
+            actual_language_count: None,
             files: vec![model_file(
                 "bullerwins/translategemma-4b-it-GGUF",
                 "translategemma-4b-it-Q4_K_M.gguf",
                 "translategemma-4b-it-Q4_K_M.gguf",
             )
-            .with_size(2_489_909_312)
-            .with_sha256("a1db9212fbef2d3ce43f4752eeb0f8eb86a911999e1cc11419eb5ffde6e72f67")],
+            .with_size(2_489_909_312)],
             prompt_style: Some(PromptStyle::Chat),
             prompt_template: Some("Translate this from {source} to {target}. Return only the translation.\n\n{text}".into()),
             estimated_download_bytes: 3 * 1024 * 1024 * 1024,
@@ -356,6 +357,7 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
             homepage: "https://huggingface.co/xiaomi-research/MiLMMT-46-1B-v0.1".into(),
             description: "Small multilingual translation model. Needs GGUF conversion before download is enabled.".into(),
             languages,
+            actual_language_count: None,
             files: Vec::new(),
             prompt_style: Some(PromptStyle::Completion),
             prompt_template: Some("Translate this from {source} to {target}.\n{source}: {text}\n{target}:".into()),
@@ -577,10 +579,6 @@ impl ModelFile {
         self
     }
 
-    fn with_sha256(mut self, sha256: &str) -> Self {
-        self.sha256 = Some(sha256.into());
-        self
-    }
 }
 
 fn prompt_style_key(style: PromptStyle) -> String {

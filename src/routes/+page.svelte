@@ -89,6 +89,7 @@
     homepage: string;
     description: string;
     languages: LanguageCode[];
+    actualLanguageCount?: number;
     files: ModelFile[];
     promptStyle?: PromptStyle;
     promptTemplate?: string;
@@ -180,7 +181,7 @@
 
   type DownloadProgress = {
     modelId: string;
-    status: "starting" | "downloading" | "preparing" | "done" | "cancelled";
+    status: "starting" | "downloading" | "verifying" | "preparing" | "done" | "cancelled";
     message: string;
     progress: number;
     downloadedBytes: number;
@@ -237,6 +238,9 @@
   $: localModelReady = Boolean(selectedModel && (specModelState(selectedModel.id) === "installed" || isModelInstalled(selectedModel.id) || hasInstalledModelFiles()));
   $: curatedModels = modelProfiles;
   $: selectableModels = availableTranslateModels(snapshot, config);
+  $: if (config && selectableModels.length && !selectableModels.find((m) => m.id === config?.modelId)) {
+    changeModel(selectableModels[0].id);
+  }
   $: uiLang = config?.uiLanguage === "ru" || config?.uiLanguage === "sk" ? config.uiLanguage : "en";
   $: if (config) applyTheme(config.theme);
   $: if (config && snapshot) scheduleConfigSave();
@@ -1704,7 +1708,6 @@
               <h2>{t("localModel")}</h2>
               <span class="pill" class:ok={localModelReady}><CheckCircle2 size={13} /> {modelPillLabel()}</span>
             </div>
-            <p class="muted">{localModelReady ? t("localModelReadyHint") : t("onboardingText")}</p>
             <p class="muted">{modelReadinessSummary()}</p>
             <h3>{t("builtInModels")}</h3>
             <div class="model-manager">
@@ -1719,7 +1722,7 @@
                   <p class="detail">{specModelDetail(model)}</p>
                   <dl>
                     <div><dt>{t("size")}</dt><dd>{modelDownloadSize(model)}</dd></div>
-                    <div><dt>{t("languages")}</dt><dd>{model.languages.length}</dd></div>
+                    <div><dt>{t("languages")}</dt><dd>{model.actualLanguageCount ?? model.languages.length}</dd></div>
                     <div><dt>{t("modelDetails")}</dt><dd>{modelAudienceLabel(model)}</dd></div>
                   </dl>
                   {#if modelRamWarning(model)}
@@ -1728,7 +1731,7 @@
                   {#if downloadState?.modelId === model.id && downloadState.status !== "done" && downloadState.status !== "cancelled"}
                     <div class="download-progress">
                       <div class="progress-meta">
-                        <span>{downloadState.status === "preparing" ? downloadState.message : t("downloading")}: {formatBytes(downloadState.totalBytes ? Math.min(downloadState.downloadedBytes, downloadState.totalBytes) : downloadState.downloadedBytes)}{downloadState.totalBytes ? ` / ${formatBytes(downloadState.totalBytes)}` : ""}</span>
+                        <span>{downloadState.status === "verifying" ? (uiLang === "ru" ? "Проверка" : "Verifying") : downloadState.status === "preparing" ? downloadState.message : t("downloading")}: {formatBytes(downloadState.totalBytes ? Math.min(downloadState.downloadedBytes, downloadState.totalBytes) : downloadState.downloadedBytes)}{downloadState.totalBytes ? ` / ${formatBytes(downloadState.totalBytes)}` : ""}</span>
                         <span>{Math.round(downloadState.progress * 100)}%</span>
                       </div>
                       <progress max="1" value={downloadState.progress}></progress>
@@ -2455,8 +2458,9 @@
     min-height: 0;
     padding: 0;
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1.5fr) minmax(220px, 380px);
     align-items: start;
+    align-content: start;
     gap: 12px;
     overflow: auto;
   }

@@ -3,6 +3,7 @@ use crate::{
     models::{EngineKind, ModelCatalogEntry},
 };
 use ort::{
+    execution_providers::CUDAExecutionProvider,
     session::{builder::GraphOptimizationLevel, Session},
     value::{DynTensor, Tensor, TensorElementType, ValueType},
 };
@@ -111,21 +112,9 @@ impl LoadedOnnxModel {
             .map_err(|err| format!("Could not load tokenizer for {}: {err}", entry.name))?;
 
         let threads = intra_op_threads();
-        let encoder = Session::builder()
-            .map_err(|err| format!("Could not create ONNX encoder session: {err}"))?
-            .with_optimization_level(GraphOptimizationLevel::All)
-            .map_err(|err| format!("Could not set encoder optimization level: {err}"))?
-            .with_intra_threads(threads)
-            .map_err(|err| format!("Could not set encoder thread count: {err}"))?
-            .commit_from_file(&encoder_path)
+        let encoder = load_session(&encoder_path, threads)
             .map_err(|err| format!("Could not load encoder model: {err}"))?;
-        let decoder = Session::builder()
-            .map_err(|err| format!("Could not create ONNX decoder session: {err}"))?
-            .with_optimization_level(GraphOptimizationLevel::All)
-            .map_err(|err| format!("Could not set decoder optimization level: {err}"))?
-            .with_intra_threads(threads)
-            .map_err(|err| format!("Could not set decoder thread count: {err}"))?
-            .commit_from_file(&decoder_path)
+        let decoder = load_session(&decoder_path, threads)
             .map_err(|err| format!("Could not load decoder model: {err}"))?;
 
         let eos_token_id = token_id(&tokenizer, "</s>")?;
@@ -493,6 +482,28 @@ fn intra_op_threads() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get().min(8))
         .unwrap_or(4)
+}
+
+fn load_session(path: &Path, threads: usize) -> Result<Session, String> {
+    if let Ok(session) = load_session_cuda(path, threads) {
+        return Ok(session);
+    }
+    load_session_cpu(path, threads).map_err(|err| err.to_string())
+}
+
+fn load_session_cuda(path: &Path, threads: usize) -> Result<Session, ort::Error> {
+    Session::builder()?
+        .with_execution_providers([CUDAExecutionProvider::default().build()])?
+        .with_optimization_level(GraphOptimizationLevel::All)?
+        .with_intra_threads(threads)?
+        .commit_from_file(path)
+}
+
+fn load_session_cpu(path: &Path, threads: usize) -> Result<Session, ort::Error> {
+    Session::builder()?
+        .with_optimization_level(GraphOptimizationLevel::All)?
+        .with_intra_threads(threads)?
+        .commit_from_file(path)
 }
 
 #[cfg(test)]

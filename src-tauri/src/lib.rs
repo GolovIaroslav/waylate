@@ -653,7 +653,18 @@ fn download_spec_model_files(
         }
         std::fs::rename(&part_path, &local_path)
             .map_err(|err| format!("Could not finalize {}: {err}", local_path.display()))?;
-        verify_spec_file(&local_path, file)?;
+        if file.sha256.is_some() {
+            emit_download(
+                app,
+                &profile.id,
+                "verifying",
+                &file.destination,
+                download_ratio(downloaded, total),
+                downloaded,
+                total,
+            );
+            verify_spec_file(&local_path, file)?;
+        }
     }
 
     write_spec_install_manifest(&target, profile)?;
