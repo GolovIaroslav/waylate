@@ -3,7 +3,9 @@ use keyring::Entry;
 const SERVICE: &str = "dev.jar.waylate";
 
 pub fn has(provider: &str) -> bool {
-    get(provider).map(|value| !value.is_empty()).unwrap_or(false)
+    get(provider)
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
 }
 
 pub fn get(provider: &str) -> Result<String, String> {

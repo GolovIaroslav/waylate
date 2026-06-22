@@ -33,8 +33,8 @@ pub fn write_clipboard(text: &str) -> Result<(), String> {
 
 fn read_text(primary: bool) -> Result<String, String> {
     let types = list_types(primary)?;
-    let mime = preferred_text_mime(&types)
-        .ok_or_else(|| "Clipboard does not contain text".to_string())?;
+    let mime =
+        preferred_text_mime(&types).ok_or_else(|| "Clipboard does not contain text".to_string())?;
 
     let mut args = Vec::new();
     if primary {
@@ -57,7 +57,13 @@ fn list_types(primary: bool) -> Result<Vec<String>, String> {
 }
 
 fn preferred_text_mime(types: &[String]) -> Option<&str> {
-    for preferred in ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "TEXT", "STRING"] {
+    for preferred in [
+        "text/plain;charset=utf-8",
+        "text/plain",
+        "UTF8_STRING",
+        "TEXT",
+        "STRING",
+    ] {
         if types.iter().any(|mime| mime == preferred) {
             return Some(preferred);
         }
@@ -89,13 +95,22 @@ mod tests {
 
     #[test]
     fn rejects_image_only_clipboard() {
-        let types = vec!["image/png".to_string(), "application/octet-stream".to_string()];
+        let types = vec![
+            "image/png".to_string(),
+            "application/octet-stream".to_string(),
+        ];
         assert_eq!(preferred_text_mime(&types), None);
     }
 
     #[test]
     fn prefers_plain_text_clipboard() {
-        let types = vec!["image/png".to_string(), "text/plain;charset=utf-8".to_string()];
-        assert_eq!(preferred_text_mime(&types), Some("text/plain;charset=utf-8"));
+        let types = vec![
+            "image/png".to_string(),
+            "text/plain;charset=utf-8".to_string(),
+        ];
+        assert_eq!(
+            preferred_text_mime(&types),
+            Some("text/plain;charset=utf-8")
+        );
     }
 }

@@ -73,14 +73,18 @@ pub struct ModelCatalogEntry {
 
 impl ModelCatalogEntry {
     pub fn language_codes_for_translate(&self) -> Vec<Language> {
-        let wants_nllb = self.engine == EngineKind::OnnxEncoderDecoder && self.id.starts_with("nllb-");
+        let wants_nllb =
+            self.engine == EngineKind::OnnxEncoderDecoder && self.id.starts_with("nllb-");
         let mut languages = vec![Language {
             code: "auto".into(),
             name: "Auto detect".into(),
         }];
         languages.extend(self.languages.iter().filter_map(|language| {
             let code = if wants_nllb {
-                language.nllb_code.as_deref().unwrap_or(language.ui_code.as_str())
+                language
+                    .nllb_code
+                    .as_deref()
+                    .unwrap_or(language.ui_code.as_str())
             } else {
                 language.ui_code.as_str()
             };
@@ -159,9 +163,15 @@ impl From<ModelCatalogEntry> for ModelProfile {
         };
         let size = human_size(entry.estimated_download_bytes);
         let engine_hint = match entry.engine {
-            EngineKind::OnnxEncoderDecoder => "Built-in ONNX engine managed by Waylate.".to_string(),
-            EngineKind::ManagedLlamaCpp => "Waylate manages llama-server automatically for this model.".to_string(),
-            EngineKind::OpenAiCompatible => "Uses an external OpenAI-compatible endpoint.".to_string(),
+            EngineKind::OnnxEncoderDecoder => {
+                "Built-in ONNX engine managed by Waylate.".to_string()
+            }
+            EngineKind::ManagedLlamaCpp => {
+                "Waylate manages llama-server automatically for this model.".to_string()
+            }
+            EngineKind::OpenAiCompatible => {
+                "Uses an external OpenAI-compatible endpoint.".to_string()
+            }
             EngineKind::NetworkApi => "Uses a network translation API.".to_string(),
         };
         let provider = match entry.engine {
@@ -182,11 +192,19 @@ impl From<ModelCatalogEntry> for ModelProfile {
             engine_hint,
             default_endpoint: None,
             hf_repo: None,
-            download_filenames: entry.files.iter().map(|file| file.destination.clone()).collect(),
+            download_filenames: entry
+                .files
+                .iter()
+                .map(|file| file.destination.clone())
+                .collect(),
             managed_prompt_style: entry.prompt_style.map(prompt_style_key),
             managed_prompt_template: entry.prompt_template,
             managed_context_size: Some(4096),
-            install_check_files: entry.files.iter().map(|file| file.destination.clone()).collect(),
+            install_check_files: entry
+                .files
+                .iter()
+                .map(|file| file.destination.clone())
+                .collect(),
             languages,
             downloadable: entry.downloadable,
         }
@@ -568,13 +586,15 @@ fn language_codes() -> Vec<LanguageCode> {
         ("ko", "Korean", Some("kor_Hang"), Some("Korean")),
     ]
     .into_iter()
-    .map(|(ui_code, label, nllb_code, llm_language_name)| LanguageCode {
-        ui_code: ui_code.into(),
-        label: label.into(),
-        nllb_code: nllb_code.map(str::to_string),
-        onnx_marian_pair: None,
-        llm_language_name: llm_language_name.map(str::to_string),
-    })
+    .map(
+        |(ui_code, label, nllb_code, llm_language_name)| LanguageCode {
+            ui_code: ui_code.into(),
+            label: label.into(),
+            nllb_code: nllb_code.map(str::to_string),
+            onnx_marian_pair: None,
+            llm_language_name: llm_language_name.map(str::to_string),
+        },
+    )
     .collect()
 }
 
@@ -694,8 +714,14 @@ mod tests {
             .into_iter()
             .find(|profile| profile.id == "nllb-200-ct2")
             .expect("nllb profile exists");
-        assert!(profile.languages.iter().any(|language| language.code == "eng_Latn"));
-        assert!(profile.languages.iter().any(|language| language.code == "rus_Cyrl"));
+        assert!(profile
+            .languages
+            .iter()
+            .any(|language| language.code == "eng_Latn"));
+        assert!(profile
+            .languages
+            .iter()
+            .any(|language| language.code == "rus_Cyrl"));
     }
 
     #[test]
@@ -703,8 +729,12 @@ mod tests {
         let catalog = model_catalog();
         assert_eq!(catalog.len(), 5);
         assert_eq!(catalog[0].id, "nllb-200-distilled-600m-onnx");
-        assert!(catalog.iter().any(|profile| profile.engine == EngineKind::OnnxEncoderDecoder));
-        assert!(catalog.iter().any(|profile| profile.engine == EngineKind::ManagedLlamaCpp));
+        assert!(catalog
+            .iter()
+            .any(|profile| profile.engine == EngineKind::OnnxEncoderDecoder));
+        assert!(catalog
+            .iter()
+            .any(|profile| profile.engine == EngineKind::ManagedLlamaCpp));
         assert!(!catalog.iter().any(|profile| profile.id.contains("ct2")));
     }
 

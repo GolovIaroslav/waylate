@@ -1,4 +1,7 @@
-use crate::{config::{AppConfig, AppPaths}, models::ModelProfile};
+use crate::{
+    config::{AppConfig, AppPaths},
+    models::ModelProfile,
+};
 use reqwest::blocking::Client;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -148,17 +151,19 @@ impl RuntimeManager {
         if config.local_model_policy != "fast" {
             return;
         }
-        if let Some(profile) = crate::models::catalog()
-            .into_iter()
-            .find(|profile| profile.id == config.model_id && profile.provider == crate::models::ProviderKind::CTranslate2)
-        {
+        if let Some(profile) = crate::models::catalog().into_iter().find(|profile| {
+            profile.id == config.model_id
+                && profile.provider == crate::models::ProviderKind::CTranslate2
+        }) {
             let _ = self.ensure_ct2_server(paths, config, &profile.id);
-        } else if let Some(profile) = crate::models::catalog()
-            .into_iter()
-            .find(|profile| profile.id == config.model_id && profile.id != "custom-local" && profile.provider == crate::models::ProviderKind::Custom)
-        {
+        } else if let Some(profile) = crate::models::catalog().into_iter().find(|profile| {
+            profile.id == config.model_id
+                && profile.id != "custom-local"
+                && profile.provider == crate::models::ProviderKind::Custom
+        }) {
             let _ = self.ensure_catalog_llama_server(paths, config, &profile, &config.model_id);
-        } else if config.model_id == "custom-local" && config.custom_backend_mode == "managed-gguf" {
+        } else if config.model_id == "custom-local" && config.custom_backend_mode == "managed-gguf"
+        {
             let _ = self.ensure_llama_server(paths, config, &config.model_id);
         }
     }
@@ -187,7 +192,8 @@ impl RuntimeManager {
 
         let port = pick_free_port()?;
         let endpoint = format!("http://127.0.0.1:{port}");
-        let logs = runtime_log_files(paths, "ct2-server.log")?;
+        let log_path = runtime_log_path(paths, "ct2-server.log");
+        let logs = runtime_log_files_for_path(&log_path)?;
         let mut child = Command::new(&server)
             .arg("--model")
             .arg(config.ct2_model_path.trim())
@@ -204,7 +210,7 @@ impl RuntimeManager {
             .spawn()
             .map_err(|err| format!("Could not start warm local runtime: {err}"))?;
 
-        let device = wait_for_ct2_health(&mut child, &endpoint)?;
+        let device = wait_for_ct2_health(&mut child, &endpoint, &log_path)?;
         let process = ManagedProcess {
             child,
             endpoint: endpoint.clone(),
@@ -242,7 +248,9 @@ impl RuntimeManager {
     ) -> Result<ManagedEndpoint, String> {
         let model_path = resolve_catalog_gguf_path(paths, profile)
             .ok_or_else(|| "This model is not installed - Download it in Settings.".to_string())?;
-        let context = profile.managed_context_size.unwrap_or(config.local_context_size);
+        let context = profile
+            .managed_context_size
+            .unwrap_or(config.local_context_size);
         self.ensure_llama_server_with_model(paths, config, profile_id, &model_path, context)
     }
 
@@ -299,14 +307,15 @@ impl RuntimeManager {
         if config.ct2_device.trim() != "cpu" {
             command.arg("-ngl").arg("99");
         }
-        let logs = runtime_log_files(paths, "llama-server.log")?;
+        let log_path = runtime_log_path(paths, "llama-server.log");
+        let logs = runtime_log_files_for_path(&log_path)?;
         let mut child = command
             .stdout(Stdio::from(logs.0))
             .stderr(Stdio::from(logs.1))
             .spawn()
             .map_err(|err| format!("Could not start managed GGUF runtime: {err}"))?;
 
-        wait_for_http_health(&mut child, &endpoint, Duration::from_secs(60))?;
+        wait_for_http_health(&mut child, &endpoint, Duration::from_secs(60), &log_path)?;
         let device = if config.ct2_device.trim() == "cpu" {
             "cpu".to_string()
         } else if llama_reports_cuda(&binary) {
@@ -344,7 +353,10 @@ impl RuntimeManager {
 
     pub fn shutdown_profile(&self, profile_id: &str) -> Result<(), String> {
         let mut process = {
-            let mut processes = self.processes.lock().map_err(|_| "Runtime state is poisoned")?;
+            let mut processes = self
+                .processes
+                .lock()
+                .map_err(|_| "Runtime state is poisoned")?;
             processes.remove(profile_id)
         };
         if let Some(process) = process.as_mut() {
@@ -354,7 +366,10 @@ impl RuntimeManager {
     }
 
     pub fn shutdown_all(&self) -> Result<(), String> {
-        let mut processes = self.processes.lock().map_err(|_| "Runtime state is poisoned")?;
+        let mut processes = self
+            .processes
+            .lock()
+            .map_err(|_| "Runtime state is poisoned")?;
         let mut owned = HashMap::new();
         std::mem::swap(&mut *processes, &mut owned);
         drop(processes);
@@ -471,7 +486,11 @@ fn ensure_ct2_server_script(paths: &AppPaths) -> Result<String, String> {
     Ok(server.display().to_string())
 }
 
-fn wait_for_ct2_health(child: &mut Child, endpoint: &str) -> Result<String, String> {
+fn wait_for_ct2_health(
+    child: &mut Child,
+    endpoint: &str,
+    log_path: &Path,
+) -> Result<String, String> {
     let client = Client::builder()
         .timeout(Duration::from_millis(600))
         .build()
@@ -479,7 +498,10 @@ fn wait_for_ct2_health(child: &mut Child, endpoint: &str) -> Result<String, Stri
     let health = format!("{endpoint}/health");
     for _ in 0..120 {
         if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
-            return Err(format!("Warm local runtime exited early with status {status}."));
+            return Err(format!(
+                "Warm local runtime exited early with status {status}. See {}.",
+                log_path.display()
+            ));
         }
         if let Ok(response) = client.get(&health).send() {
             if let Ok(response) = response.error_for_status() {
@@ -495,10 +517,18 @@ fn wait_for_ct2_health(child: &mut Child, endpoint: &str) -> Result<String, Stri
         }
         thread::sleep(Duration::from_millis(250));
     }
-    Err("Warm local runtime did not become ready in time.".into())
+    Err(format!(
+        "Warm local runtime did not become ready in time. See {}.",
+        log_path.display()
+    ))
 }
 
-fn wait_for_http_health(child: &mut Child, endpoint: &str, timeout: Duration) -> Result<(), String> {
+fn wait_for_http_health(
+    child: &mut Child,
+    endpoint: &str,
+    timeout: Duration,
+    log_path: &Path,
+) -> Result<(), String> {
     let client = Client::builder()
         .timeout(Duration::from_millis(800))
         .build()
@@ -507,7 +537,10 @@ fn wait_for_http_health(child: &mut Child, endpoint: &str, timeout: Duration) ->
     let started = Instant::now();
     while started.elapsed() < timeout {
         if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
-            return Err(format!("Managed local runtime exited early with status {status}."));
+            return Err(format!(
+                "Managed local runtime exited early with status {status}. See {}.",
+                log_path.display()
+            ));
         }
         if client
             .get(&health)
@@ -519,7 +552,10 @@ fn wait_for_http_health(child: &mut Child, endpoint: &str, timeout: Duration) ->
         }
         thread::sleep(Duration::from_millis(300));
     }
-    Err("Managed local runtime did not become ready in time.".into())
+    Err(format!(
+        "Managed local runtime did not become ready in time. See {}.",
+        log_path.display()
+    ))
 }
 
 fn health_ok(endpoint: &str) -> bool {
@@ -558,19 +594,23 @@ fn collect_dead_profiles(processes: &mut HashMap<String, ManagedProcess>) -> Vec
 fn timeout_for_policy(config: &AppConfig) -> Option<Duration> {
     match config.local_model_policy.as_str() {
         "memory-saver" => Some(Duration::from_secs(0)),
-        "balanced" => Some(Duration::from_secs(config.local_model_idle_timeout_secs.max(15))),
+        "balanced" => Some(Duration::from_secs(
+            config.local_model_idle_timeout_secs.max(15),
+        )),
         _ => None,
     }
 }
 
-fn runtime_log_files(paths: &AppPaths, name: &str) -> Result<(File, File), String> {
+pub fn runtime_log_path(paths: &AppPaths, name: &str) -> PathBuf {
     let logs_dir = paths.data_dir.join("logs");
-    fs::create_dir_all(&logs_dir).map_err(|err| err.to_string())?;
-    runtime_log_files_for_path(&logs_dir.join(name))
+    logs_dir.join(name)
 }
 
 fn runtime_log_files_for_path(path: impl Into<PathBuf>) -> Result<(File, File), String> {
     let path = path.into();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
     let stdout = OpenOptions::new()
         .create(true)
         .append(true)
@@ -688,10 +728,14 @@ pub fn translate_via_warm_ct2(
         Err(_) => {
             let _ = manager.shutdown_profile(profile_id);
             match manager.ensure_ct2_server(paths, config, profile_id) {
-                Ok(restarted) => match warm_ct2_request(&restarted.endpoint, source, target, text) {
-                    Ok(value) => (value, restarted.device),
-                    Err(_) => return translate_via_ct2_helper(paths, config, source, target, text),
-                },
+                Ok(restarted) => {
+                    match warm_ct2_request(&restarted.endpoint, source, target, text) {
+                        Ok(value) => (value, restarted.device),
+                        Err(_) => {
+                            return translate_via_ct2_helper(paths, config, source, target, text)
+                        }
+                    }
+                }
                 Err(_) => return translate_via_ct2_helper(paths, config, source, target, text),
             }
         }
@@ -754,7 +798,12 @@ fn translate_via_ct2_helper(
     Ok((translated, device))
 }
 
-fn warm_ct2_request(endpoint: &str, source: &str, target: &str, text: &str) -> Result<Value, String> {
+fn warm_ct2_request(
+    endpoint: &str,
+    source: &str,
+    target: &str,
+    text: &str,
+) -> Result<Value, String> {
     Client::new()
         .post(format!("{endpoint}/translate"))
         .json(&json!({
@@ -798,7 +847,9 @@ pub fn translate_via_managed_llama(
         value
             .get("content")
             .and_then(Value::as_str)
-            .ok_or_else(|| "Managed local model response did not contain completion text".to_string())?
+            .ok_or_else(|| {
+                "Managed local model response did not contain completion text".to_string()
+            })?
             .trim()
             .to_string()
     } else {
@@ -823,7 +874,9 @@ pub fn translate_via_managed_llama(
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
             .or_else(|| value.pointer("/choices/0/text").and_then(Value::as_str))
-            .ok_or_else(|| "Managed local model response did not contain a translation".to_string())?
+            .ok_or_else(|| {
+                "Managed local model response did not contain a translation".to_string()
+            })?
             .trim()
             .to_string()
     };
@@ -843,7 +896,13 @@ pub fn translate_via_spec_llama(
     prompt_style: &Option<crate::models::PromptStyle>,
     prompt: &str,
 ) -> Result<(String, String), String> {
-    let endpoint = manager.ensure_llama_server_with_model(paths, config, profile_id, model_path, context_size)?;
+    let endpoint = manager.ensure_llama_server_with_model(
+        paths,
+        config,
+        profile_id,
+        model_path,
+        context_size,
+    )?;
     let is_completion = matches!(prompt_style, Some(crate::models::PromptStyle::Completion));
     let translated = if is_completion {
         let value: Value = Client::new()
@@ -890,11 +949,46 @@ pub fn translate_via_spec_llama(
     Ok((translated, endpoint.device))
 }
 
+pub fn translate_via_spec_llama_chat(
+    manager: &RuntimeManager,
+    paths: &AppPaths,
+    config: &AppConfig,
+    profile_id: &str,
+    model_path: &str,
+    context_size: u32,
+    body: Value,
+) -> Result<(String, String), String> {
+    let endpoint = manager.ensure_llama_server_with_model(
+        paths,
+        config,
+        profile_id,
+        model_path,
+        context_size,
+    )?;
+    let value: Value = Client::new()
+        .post(format!("{}/v1/chat/completions", endpoint.endpoint))
+        .json(&body)
+        .send()
+        .map_err(|err| format!("Local model could not process translation: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("Local model returned an error: {err}"))?
+        .json()
+        .map_err(|err| format!("Could not parse local model response: {err}"))?;
+    let translated = value
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/choices/0/text").and_then(Value::as_str))
+        .ok_or_else(|| "Local model response did not contain a translation".to_string())?
+        .trim()
+        .to_string();
+    Ok((translated, endpoint.device))
+}
+
 /// Pinned llama.cpp release used for the bundled llama-server.
 /// Update this constant when bumping the bundled runtime version.
-const LLAMA_SERVER_RELEASE: &str = "b9747";
+const LLAMA_SERVER_RELEASE: &str = "b8987";
 const LLAMA_SERVER_ZIP_URL: &str =
-    "https://github.com/ggml-org/llama.cpp/releases/download/b9747/llama-b9747-bin-ubuntu-x64.tar.gz";
+    "https://github.com/ggml-org/llama.cpp/releases/download/b8987/llama-b8987-bin-ubuntu-x64.tar.gz";
 
 /// Resolve a usable `llama-server` binary.
 ///
@@ -948,16 +1042,27 @@ fn resolve_llama_binary_from_path() -> Option<String> {
     }
     let path = String::from_utf8(output.stdout).ok()?;
     let path = path.trim();
-    if path.is_empty() { None } else { Some(path.into()) }
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.into())
+    }
 }
 
-fn download_llama_server_binary(paths: &AppPaths, dest: &std::path::Path) -> Result<String, String> {
+fn download_llama_server_binary(
+    paths: &AppPaths,
+    dest: &std::path::Path,
+) -> Result<String, String> {
     let runtime_dir = paths.data_dir.join("runtime");
     fs::create_dir_all(&runtime_dir).map_err(|err| err.to_string())?;
 
     let archive_path = runtime_dir.join(format!(
         "llama-server-{LLAMA_SERVER_RELEASE}.{}",
-        if LLAMA_SERVER_ZIP_URL.ends_with(".tar.gz") { "tar.gz" } else { "zip" }
+        if LLAMA_SERVER_ZIP_URL.ends_with(".tar.gz") {
+            "tar.gz"
+        } else {
+            "zip"
+        }
     ));
 
     // Download the archive.
@@ -1031,10 +1136,14 @@ fn extract_llama_runtime_zip(archive_path: &Path, dest: &Path) -> Result<(), Str
         if !name.starts_with(&companion_dir) {
             continue;
         }
-        let Some(filename) = Path::new(&name).file_name().and_then(|value| value.to_str()) else {
+        let Some(filename) = Path::new(&name)
+            .file_name()
+            .and_then(|value| value.to_str())
+        else {
             continue;
         };
-        let is_shared_lib = filename.starts_with("lib") && (filename.contains(".so") || filename == "mtmd.dll");
+        let is_shared_lib =
+            filename.starts_with("lib") && (filename.contains(".so") || filename == "mtmd.dll");
         if !is_shared_lib {
             continue;
         }
@@ -1058,7 +1167,10 @@ fn extract_llama_runtime_tar_gz(archive_path: &Path, dest: &Path) -> Result<(), 
     let decoder = flate2::read::GzDecoder::new(archive_file);
     let mut archive = tar::Archive::new(decoder);
     let mut found = false;
-    for entry in archive.entries().map_err(|err| format!("Could not read llama tar entries: {err}"))? {
+    for entry in archive
+        .entries()
+        .map_err(|err| format!("Could not read llama tar entries: {err}"))?
+    {
         let mut entry = entry.map_err(|err| format!("Could not read llama tar entry: {err}"))?;
         let path = entry.path().map_err(|err| err.to_string())?.into_owned();
         let Some(filename) = path.file_name().and_then(|value| value.to_str()) else {
@@ -1083,8 +1195,9 @@ fn extract_llama_runtime_tar_gz(archive_path: &Path, dest: &Path) -> Result<(), 
                 .link_name()
                 .map_err(|err| err.to_string())?
                 .ok_or_else(|| format!("Missing symlink target for {}", filename))?;
-            symlink(&link_target, &dest_path)
-                .map_err(|err| format!("Could not create symlink {}: {err}", dest_path.display()))?;
+            symlink(&link_target, &dest_path).map_err(|err| {
+                format!("Could not create symlink {}: {err}", dest_path.display())
+            })?;
             continue;
         }
         let mut out = File::create(&dest_path)
@@ -1108,14 +1221,15 @@ fn managed_llama_runtime_complete(binary: &Path) -> bool {
         return false;
     }
     let runtime_dir = binary.parent().unwrap_or_else(|| Path::new("."));
-    ["libllama.so", "libllama-common.so.0", "libggml.so.0"]
+    let libraries_ready = ["libllama.so", "libllama-common.so.0", "libggml.so.0"]
         .iter()
         .all(|name| {
             let path = runtime_dir.join(name);
             std::fs::symlink_metadata(&path)
                 .map(|meta| meta.file_type().is_symlink() || meta.len() > 0)
                 .unwrap_or(false)
-        })
+        });
+    libraries_ready && llama_binary_usable(binary)
 }
 
 fn managed_llama_library_dir(binary: &str) -> Option<PathBuf> {
@@ -1124,6 +1238,30 @@ fn managed_llama_library_dir(binary: &str) -> Option<PathBuf> {
         return None;
     }
     path.parent().map(Path::to_path_buf)
+}
+
+fn llama_binary_usable(binary: &Path) -> bool {
+    let Some(runtime_dir) = binary.parent() else {
+        return false;
+    };
+    let mut command = Command::new(binary);
+    command.arg("--version");
+    if let Ok(existing) = std::env::var("LD_LIBRARY_PATH") {
+        let mut ld_path = runtime_dir.display().to_string();
+        if !existing.trim().is_empty() {
+            ld_path.push(':');
+            ld_path.push_str(&existing);
+        }
+        command.env("LD_LIBRARY_PATH", ld_path);
+    } else {
+        command.env("LD_LIBRARY_PATH", runtime_dir.display().to_string());
+    }
+    command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1157,7 +1295,10 @@ mod tests {
         };
 
         assert_eq!(timeout_for_policy(&fast), None);
-        assert_eq!(timeout_for_policy(&balanced), Some(Duration::from_secs(900)));
+        assert_eq!(
+            timeout_for_policy(&balanced),
+            Some(Duration::from_secs(900))
+        );
         assert_eq!(timeout_for_policy(&saver), Some(Duration::from_secs(0)));
     }
 }
