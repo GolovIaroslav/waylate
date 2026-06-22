@@ -43,7 +43,12 @@ pub fn translate_with_progress(
     {
         return match entry.engine {
             EngineKind::OnnxEncoderDecoder => crate::engines::onnx_mt::translate_with_progress(
-                paths, &entry, &request.text, &request.source_lang, &request.target_lang, on_progress,
+                paths,
+                &entry,
+                &request.text,
+                &request.source_lang,
+                &request.target_lang,
+                on_progress,
             )
             .map(|translated_text| TranslationResponse {
                 translated_text,
@@ -68,7 +73,9 @@ pub fn translate_with_progress(
 
     match profile.provider {
         ProviderKind::OpenAiCompatible => translate_openai_compatible(config, request),
-        ProviderKind::Custom => translate_custom_local(paths, runtime_manager, config, request, &profile),
+        ProviderKind::Custom => {
+            translate_custom_local(paths, runtime_manager, config, request, &profile)
+        }
         ProviderKind::CTranslate2 => translate_ctranslate2(paths, runtime_manager, config, request),
         ProviderKind::DeepL => translate_deepl(config, request),
         ProviderKind::Google => translate_google(config, request),
@@ -86,28 +93,56 @@ fn translate_spec_managed_llama(
     let model_path = resolve_spec_gguf_path(paths, entry)
         .ok_or_else(|| "This model is not installed — Download it in Settings.".to_string())?;
 
-    let template = entry
+    let (translated, device) = if entry.id == "translategemma-4b-gguf" {
+        if request.source_lang == "auto" {
+            return Err("TranslateGemma needs an explicit source language.".into());
+        }
+        runtime::translate_via_spec_llama_chat(
+            runtime_manager,
+            paths,
+            config,
+            &request.model_id,
+            &model_path,
+            4096,
+            json!({
+                "model": "managed-local-gguf",
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "source_lang_code": request.source_lang.replace('_', "-"),
+                        "target_lang_code": request.target_lang.replace('_', "-"),
+                        "text": request.text,
+                    }]
+                }],
+                "temperature": 0.1,
+                "stream": false
+            }),
+        )?
+    } else {
+        let template = entry
         .prompt_template
         .as_deref()
         .unwrap_or("Translate the following text from {source} to {target}. Return only the translation.\n\n{text}");
 
-    let prompt = template
-        .replace("{source}", &request.source_lang)
-        .replace("{target}", &request.target_lang)
-        .replace("{text}", &request.text);
+        let prompt = template
+            .replace("{source}", &request.source_lang)
+            .replace("{target}", &request.target_lang)
+            .replace("{text}", &request.text);
 
-    let context_size = entry.min_ram_bytes.map(|_| 4096u32).unwrap_or(4096);
+        let context_size = entry.min_ram_bytes.map(|_| 4096u32).unwrap_or(4096);
 
-    let (translated, device) = runtime::translate_via_spec_llama(
-        runtime_manager,
-        paths,
-        config,
-        &request.model_id,
-        &model_path,
-        context_size,
-        &entry.prompt_style,
-        &prompt,
-    )?;
+        runtime::translate_via_spec_llama(
+            runtime_manager,
+            paths,
+            config,
+            &request.model_id,
+            &model_path,
+            context_size,
+            &entry.prompt_style,
+            &prompt,
+        )?
+    };
 
     Ok(TranslationResponse {
         translated_text: translated,
@@ -116,7 +151,10 @@ fn translate_spec_managed_llama(
     })
 }
 
-fn resolve_spec_gguf_path(paths: &crate::config::AppPaths, entry: &ModelCatalogEntry) -> Option<String> {
+fn resolve_spec_gguf_path(
+    paths: &crate::config::AppPaths,
+    entry: &ModelCatalogEntry,
+) -> Option<String> {
     let dir = paths.models_dir.join(&entry.id);
     // Check declared files first.
     for file in &entry.files {
@@ -139,7 +177,10 @@ fn resolve_spec_gguf_path(paths: &crate::config::AppPaths, entry: &ModelCatalogE
         .map(|p| p.display().to_string())
 }
 
-fn translate_openai_compatible(config: &AppConfig, request: &TranslationRequest) -> Result<TranslationResponse, String> {
+fn translate_openai_compatible(
+    config: &AppConfig,
+    request: &TranslationRequest,
+) -> Result<TranslationResponse, String> {
     let endpoint = if config.openai_endpoint.trim().is_empty() {
         "http://127.0.0.1:8080/v1/chat/completions"
     } else {
@@ -166,7 +207,9 @@ fn translate_openai_compatible(config: &AppConfig, request: &TranslationRequest)
 
     let value: Value = builder
         .send()
-        .map_err(|err| format!("Could not reach local OpenAI-compatible server at {endpoint}: {err}"))?
+        .map_err(|err| {
+            format!("Could not reach local OpenAI-compatible server at {endpoint}: {err}")
+        })?
         .error_for_status()
         .map_err(|err| format!("Local translation server returned an error: {err}"))?
         .json()
@@ -193,7 +236,8 @@ fn translate_custom_local(
     profile: &crate::models::ModelProfile,
 ) -> Result<TranslationResponse, String> {
     if profile.id != "custom-local" {
-        let (translated, device) = translate_catalog_managed_gguf(paths, runtime_manager, config, request, profile)?;
+        let (translated, device) =
+            translate_catalog_managed_gguf(paths, runtime_manager, config, request, profile)?;
         return Ok(TranslationResponse {
             translated_text: translated,
             provider_label: format!("Managed local GGUF ({device})"),
@@ -283,7 +327,10 @@ fn translate_ctranslate2(
     })
 }
 
-fn translate_deepl(config: &AppConfig, request: &TranslationRequest) -> Result<TranslationResponse, String> {
+fn translate_deepl(
+    config: &AppConfig,
+    request: &TranslationRequest,
+) -> Result<TranslationResponse, String> {
     ensure_network_enabled(config)?;
     let key = secrets::get("deepl")?;
     let endpoint = "https://api-free.deepl.com/v2/translate";
@@ -318,11 +365,16 @@ fn translate_deepl(config: &AppConfig, request: &TranslationRequest) -> Result<T
     })
 }
 
-fn translate_google(config: &AppConfig, request: &TranslationRequest) -> Result<TranslationResponse, String> {
+fn translate_google(
+    config: &AppConfig,
+    request: &TranslationRequest,
+) -> Result<TranslationResponse, String> {
     ensure_network_enabled(config)?;
     let key = secrets::get("google")?;
     let value: Value = Client::new()
-        .post(format!("https://translation.googleapis.com/language/translate/v2?key={key}"))
+        .post(format!(
+            "https://translation.googleapis.com/language/translate/v2?key={key}"
+        ))
         .form(&[
             ("q", request.text.as_str()),
             ("target", request.target_lang.as_str()),
@@ -348,7 +400,10 @@ fn translate_google(config: &AppConfig, request: &TranslationRequest) -> Result<
     })
 }
 
-fn translate_yandex(config: &AppConfig, request: &TranslationRequest) -> Result<TranslationResponse, String> {
+fn translate_yandex(
+    config: &AppConfig,
+    request: &TranslationRequest,
+) -> Result<TranslationResponse, String> {
     ensure_network_enabled(config)?;
     let key = secrets::get("yandex")?;
     if config.yandex_folder_id.trim().is_empty() {
@@ -378,7 +433,9 @@ fn translate_yandex(config: &AppConfig, request: &TranslationRequest) -> Result<
     let translated = value
         .pointer("/translations/0/text")
         .and_then(Value::as_str)
-        .ok_or_else(|| "Yandex Cloud Translate response did not contain a translation".to_string())?;
+        .ok_or_else(|| {
+            "Yandex Cloud Translate response did not contain a translation".to_string()
+        })?;
 
     Ok(TranslationResponse {
         translated_text: translated.to_string(),
@@ -416,8 +473,9 @@ mod tests {
             model_id: "tencent-hy-mt2-1.8b-gguf".into(),
         };
 
-        let response = translate_with_progress(&paths, &runtime, &config, &request, &mut |_| Ok(()))
-            .expect("Hy-MT2 translation should succeed");
+        let response =
+            translate_with_progress(&paths, &runtime, &config, &request, &mut |_| Ok(()))
+                .expect("Hy-MT2 translation should succeed");
         assert!(!response.translated_text.trim().is_empty());
         eprintln!("Hy-MT2 translation: {}", response.translated_text);
         let _ = runtime.shutdown_all();
