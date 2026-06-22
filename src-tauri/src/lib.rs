@@ -199,6 +199,13 @@ fn get_model_status(
     {
         return Ok(InstallState::Ready);
     }
+    // Files are fully present even without a manifest (e.g. download interrupted after write but
+    // before manifest was written). Heal the manifest and report ready.
+    if all_spec_files_complete(&target, &profile) {
+        let _ = write_spec_install_manifest(&target, &profile);
+        let _ = persist_spec_install_metadata(&state.paths, &profile, &target);
+        return Ok(InstallState::Ready);
+    }
     if spec_dir_has_partial_files(&target, &profile) {
         return Ok(InstallState::Failed {
             message: "Previous download did not finish.".into(),
@@ -1442,6 +1449,14 @@ fn file_sha256(path: &Path) -> Result<String, String> {
         hasher.update(&buffer[..read]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn all_spec_files_complete(target: &Path, profile: &ModelCatalogEntry) -> bool {
+    !profile.files.is_empty()
+        && profile
+            .files
+            .iter()
+            .all(|file| is_complete_spec_file(&target.join(&file.destination), file).unwrap_or(false))
 }
 
 fn spec_dir_has_partial_files(path: &Path, profile: &ModelCatalogEntry) -> bool {

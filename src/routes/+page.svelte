@@ -22,7 +22,6 @@
 
   type ProviderKind =
     | "open-ai-compatible"
-    | "c-translate2"
     | "deep-l"
     | "google"
     | "yandex"
@@ -1235,7 +1234,7 @@
   function modelProvider(model: TranslateModel | undefined | null): ProviderKind | null {
     if (!model) return null;
     if ("provider" in model) return model.provider;
-    if (model.engine === "onnx-encoder-decoder") return "c-translate2";
+    if (model.engine === "onnx-encoder-decoder") return "custom";
     if (model.engine === "managed-llama-cpp") return "custom";
     if (model.engine === "open-ai-compatible") return "open-ai-compatible";
     return null;
@@ -1299,7 +1298,8 @@
     if (modelProvider(selectedModel) === "custom" && config?.customBackendMode === "managed-gguf") {
       return Boolean(config.customModelPath);
     }
-    return Boolean(config?.openaiEndpoint);
+    // external-openai: we can't know if a server is running, don't show as installed
+    return false;
   }
 
   function hasTokenizerReady() {
@@ -1493,6 +1493,11 @@
       || message.includes("Warm local runtime did not become ready in time")
     ) {
       return t("localRuntimeUnavailable");
+    }
+    if (message.includes("Could not reach local OpenAI-compatible server")) {
+      return uiLang === "ru"
+        ? "Локальный сервер не отвечает. Запустите сервер (например, llama-server или Ollama) вручную и убедитесь что адрес endpoint в настройках совпадает."
+        : "Local server is not responding. Start your server (e.g. llama-server or Ollama) and make sure the endpoint in Settings matches.";
     }
     return message;
   }
@@ -1723,7 +1728,7 @@
                   {#if downloadState?.modelId === model.id && downloadState.status !== "done" && downloadState.status !== "cancelled"}
                     <div class="download-progress">
                       <div class="progress-meta">
-                        <span>{downloadState.status === "preparing" ? downloadState.message : t("downloading")}: {formatBytes(downloadState.downloadedBytes)}{downloadState.totalBytes ? ` / ${formatBytes(downloadState.totalBytes)}` : ""}</span>
+                        <span>{downloadState.status === "preparing" ? downloadState.message : t("downloading")}: {formatBytes(downloadState.totalBytes ? Math.min(downloadState.downloadedBytes, downloadState.totalBytes) : downloadState.downloadedBytes)}{downloadState.totalBytes ? ` / ${formatBytes(downloadState.totalBytes)}` : ""}</span>
                         <span>{Math.round(downloadState.progress * 100)}%</span>
                       </div>
                       <progress max="1" value={downloadState.progress}></progress>
@@ -1799,6 +1804,13 @@
             </details>
             <details>
               <summary>{t("advancedLocalBackend")}</summary>
+              {#if config.customBackendMode === "external-openai"}
+                <p class="muted custom-local-hint">
+                  {uiLang === "ru"
+                    ? "Запустите любой локальный OpenAI-совместимый сервер (Ollama, llama-server, LM Studio и др.) и укажите его адрес ниже. Пример: ollama serve → http://localhost:11434/v1/chat/completions"
+                    : "Start any local OpenAI-compatible server (Ollama, llama-server, LM Studio, etc.) and enter its address below. Example: ollama serve → http://localhost:11434/v1/chat/completions"}
+                </p>
+              {/if}
               <label>
                 <span>{t("customBackendMode")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "customBackendMode")} on:mouseenter={() => showHelp("customBackendMode")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "customBackendMode"}<span class="help-popover">{help("customBackendMode")}</span>{/if}</button></span>
                 <select bind:value={config.customBackendMode}>
@@ -2444,6 +2456,7 @@
     padding: 0;
     display: grid;
     grid-template-columns: 1fr 1fr;
+    align-items: start;
     gap: 12px;
     overflow: auto;
   }
@@ -2592,6 +2605,14 @@
     width: 100%;
     height: 8px;
     accent-color: var(--primary);
+  }
+
+  .custom-local-hint {
+    padding: 8px 10px;
+    border-left: 3px solid var(--primary);
+    border-radius: 0 6px 6px 0;
+    background: var(--surface-soft);
+    font-size: 12px;
   }
 
   details {

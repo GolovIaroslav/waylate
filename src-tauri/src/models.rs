@@ -154,6 +154,7 @@ impl From<ModelCatalogEntry> for ModelProfile {
         let languages = entry.language_codes_for_translate();
         let quantization = match entry.id.as_str() {
             "nllb-200-distilled-600m-onnx" => "INT8 ONNX",
+            "nllb-200-distilled-1.3b-onnx" => "INT8 ONNX",
             "opus-mt-marian-onnx" => "Pair-specific ONNX",
             "tencent-hy-mt2-1.8b-gguf" => "Q4_K_M GGUF",
             "translategemma-4b-gguf" => "Q4_K_M GGUF",
@@ -247,6 +248,36 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
             estimated_download_bytes: 911_957_478,
             estimated_disk_bytes: 911_957_478,
             min_ram_bytes: Some(2 * 1024 * 1024 * 1024),
+            downloadable: true,
+        },
+        ModelCatalogEntry {
+            id: "nllb-200-distilled-1.3b-onnx".into(),
+            name: "NLLB-200 1.3B (Meta)".into(),
+            engine: EngineKind::OnnxEncoderDecoder,
+            audience: Audience::HighQuality,
+            license: "CC-BY-NC-4.0".into(),
+            license_url: "https://creativecommons.org/licenses/by-nc/4.0/".into(),
+            homepage: "https://huggingface.co/facebook/nllb-200-distilled-1.3B".into(),
+            description: "Higher-quality NLLB variant. Same 200 languages, better translation. Needs ~4 GB RAM.".into(),
+            languages: languages.clone(),
+            files: vec![
+                model_file(
+                    "Xenova/nllb-200-distilled-1.3B",
+                    "onnx/encoder_model_quantized.onnx",
+                    "encoder_model_quantized.onnx",
+                ),
+                model_file(
+                    "Xenova/nllb-200-distilled-1.3B",
+                    "onnx/decoder_model_merged_quantized.onnx",
+                    "decoder_model_merged_quantized.onnx",
+                ),
+                model_file("Xenova/nllb-200-distilled-1.3B", "tokenizer.json", "tokenizer.json"),
+            ],
+            prompt_style: None,
+            prompt_template: None,
+            estimated_download_bytes: 1_950_000_000,
+            estimated_disk_bytes: 1_950_000_000,
+            min_ram_bytes: Some(4 * 1024 * 1024 * 1024),
             downloadable: true,
         },
         ModelCatalogEntry {
@@ -619,7 +650,7 @@ mod tests {
     #[test]
     fn spec_catalog_contains_only_agreed_local_engines() {
         let catalog = model_catalog();
-        assert_eq!(catalog.len(), 5);
+        assert_eq!(catalog.len(), 6);
         assert_eq!(catalog[0].id, "nllb-200-distilled-600m-onnx");
         assert!(catalog
             .iter()
