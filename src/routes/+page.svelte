@@ -151,6 +151,7 @@
       hasLlamaServer: boolean;
       ct2CudaDevices: number;
       llamaCudaReported: boolean;
+      totalMemoryBytes?: number;
     };
     runtime: {
       activeProfiles: {
@@ -174,6 +175,7 @@
       dataDir: string;
       modelsDir: string;
       historyDb: string;
+      logsDir: string;
     };
   };
 
@@ -230,6 +232,9 @@
   let modelProfiles: ModelCatalogEntry[] = [];
   let modelStatuses: Record<string, string> = {};
   let secretSaveTimers: Partial<Record<SecretProvider, number>> = {};
+  let runtimeLogName = "llama-server.log";
+  let runtimeLogText = "";
+  let runtimeLogLoading = false;
 
   type SecretProvider = "deepl" | "google" | "yandex" | "openai-compatible";
 
@@ -604,7 +609,11 @@
       deleteModel: "Delete",
       openModelFolder: "Open models folder",
       openConfigFolder: "Open settings folder",
+      openLogsFolder: "Open logs folder",
       sampleTranslation: "Sample translation",
+      recentLog: "Recent runtime log",
+      noRuntimeLog: "No log output yet.",
+      modelRamWarning: "This model may be too heavy for this PC.",
     },
     ru: {
       translate: "Перевести",
@@ -721,7 +730,11 @@
       deleteModel: "Удалить",
       openModelFolder: "Открыть папку моделей",
       openConfigFolder: "Открыть папку настроек",
+      openLogsFolder: "Открыть папку логов",
       sampleTranslation: "Пробный перевод",
+      recentLog: "Последний лог runtime",
+      noRuntimeLog: "Логов пока нет.",
+      modelRamWarning: "Эта модель может быть слишком тяжёлой для этого ПК.",
     },
     sk: {
       translate: "Preložiť",
@@ -838,7 +851,11 @@
       deleteModel: "Odstrániť",
       openModelFolder: "Otvoriť priečinok modelov",
       openConfigFolder: "Otvoriť priečinok nastavení",
+      openLogsFolder: "Otvoriť priečinok logov",
       sampleTranslation: "Skúšobný preklad",
+      recentLog: "Posledný runtime log",
+      noRuntimeLog: "Zatiaľ nie sú žiadne logy.",
+      modelRamWarning: "Tento model môže byť pre tento počítač príliš ťažký.",
     },
   } as const;
 
@@ -915,6 +932,18 @@
     const available = availableTranslateModels(snapshot, config);
     if (config && available.length && !available.some((model) => model.id === config?.modelId)) {
       changeModel(available[0].id);
+    }
+  }
+
+  async function loadRuntimeLog(name: string) {
+    runtimeLogLoading = true;
+    runtimeLogName = name;
+    try {
+      runtimeLogText = await invoke<string>("read_runtime_log", { name });
+    } catch (err) {
+      runtimeLogText = String(err);
+    } finally {
+      runtimeLogLoading = false;
     }
   }
 
@@ -1127,6 +1156,11 @@
     await removeModel(modelId);
     if (error) return;
     await downloadModel(modelId);
+  }
+
+  async function revealLogsDir() {
+    if (!snapshot) return;
+    await invoke("reveal_path", { path: snapshot.paths.logsDir });
   }
 
   async function cancelDownload() {
@@ -1485,6 +1519,11 @@
 
   function specModelDetail(model: ModelCatalogEntry) {
     const parts = [modelAudienceLabel(model), model.license];
+    if (model.id === "translategemma-4b-gguf") {
+      parts.push(uiLang === "ru" ? "нужна acceptance лицензии Gemma" : uiLang === "sk" ? "vyzaduje prijatie licencie Gemma" : "Gemma license acceptance required");
+    }
+    const warning = modelRamWarning(model);
+    if (warning) parts.push(warning);
     return parts.filter(Boolean).join(" · ");
   }
 
@@ -1498,6 +1537,12 @@
       return t("localRuntimeUnavailable");
     }
     return message;
+  }
+
+  function modelRamWarning(model: ModelCatalogEntry) {
+    const total = snapshot?.environment.totalMemoryBytes;
+    if (!total || !model.minRamBytes || model.minRamBytes <= total) return "";
+    return t("modelRamWarning");
   }
 
   function displayLanguageName(
@@ -1534,7 +1579,7 @@
     const summaries: Record<string, string> = {
       "nllb-200-distilled-600m-onnx": "Рекомендуемая модель для старта. Работает быстро, поддерживает сотни языков и не требует GPU.",
       "tencent-hy-mt2-1.8b-gguf": "Компактная многоязычная GGUF-модель. Высокое качество перевода при скромном размере.",
-      "translategemma-4b-gguf": "Качественная GGUF-модель от Google для мощных ПК. Пока в разработке.",
+      "translategemma-4b-gguf": "Качественная GGUF-модель от Google для мощных ПК. Пока выключена: нужна acceptance лицензии Gemma.",
       "milmmt-46-1b-gguf": "GGUF-модель с хорошим балансом размера и качества, включая словацкий язык.",
     };
     return summaries[model.id] ?? model.description;
@@ -1714,6 +1759,9 @@
                     <div><dt>{t("languages")}</dt><dd>{model.languages.length}</dd></div>
                     <div><dt>{t("modelDetails")}</dt><dd>{modelAudienceLabel(model)}</dd></div>
                   </dl>
+                  {#if modelRamWarning(model)}
+                    <p class="inline-note">{modelRamWarning(model)}</p>
+                  {/if}
                   {#if downloadState?.modelId === model.id && downloadState.status !== "done" && downloadState.status !== "cancelled"}
                     <div class="download-progress">
                       <div class="progress-meta">
@@ -1773,6 +1821,7 @@
               <button on:click={testBackend} disabled={testing || downloading || translating || !hasInstalledModelFiles()}><span class:spin={testing}><RefreshCw size={16} /></span> {t("runtimeProbe")}</button>
               <button on:click={revealModelsDir}><FolderOpen size={16} /> {t("openModelFolder")}</button>
               <button on:click={revealConfigDir}><FolderOpen size={16} /> {t("openConfigFolder")}</button>
+              <button on:click={revealLogsDir}><FolderOpen size={16} /> {t("openLogsFolder")}</button>
             </div>
             {#if probeResult}
               <div class="probe-result">
@@ -1782,6 +1831,15 @@
             {:else if status || error}
               <p class:error-note={Boolean(error)} class="inline-note">{error || status}</p>
             {/if}
+            <details class="diagnostics-card">
+              <summary>{t("diagnostics")}</summary>
+              <div class="settings-actions">
+                <button on:click={() => loadRuntimeLog("llama-server.log")} disabled={runtimeLogLoading}>llama-server.log</button>
+                <button on:click={() => loadRuntimeLog("ct2-server.log")} disabled={runtimeLogLoading}>ct2-server.log</button>
+              </div>
+              <strong>{t("recentLog")}: {runtimeLogName}</strong>
+              <pre class="runtime-log">{runtimeLogText || t("noRuntimeLog")}</pre>
+            </details>
             <details>
               <summary>{t("advancedLocalBackend")}</summary>
               <label>
@@ -2061,6 +2119,20 @@
 
   .primary:hover {
     background: var(--primary-hover);
+  }
+
+  pre.runtime-log {
+    margin: 8px 0 0;
+    max-height: 240px;
+    overflow: auto;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-soft);
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 12px;
+    line-height: 1.35;
   }
 
   .shell {

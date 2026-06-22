@@ -82,6 +82,7 @@ struct EnvironmentReport {
     has_llama_server: bool,
     ct2_cuda_devices: u32,
     llama_cuda_reported: bool,
+    total_memory_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +92,7 @@ struct PathReport {
     data_dir: String,
     models_dir: String,
     history_db: String,
+    logs_dir: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,6 +171,7 @@ fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
             data_dir: state.paths.data_dir.display().to_string(),
             models_dir: state.paths.models_dir.display().to_string(),
             history_db: state.paths.history_db.display().to_string(),
+            logs_dir: state.paths.data_dir.join("logs").display().to_string(),
         },
     })
 }
@@ -179,7 +182,10 @@ fn list_model_profiles() -> Vec<ModelCatalogEntry> {
 }
 
 #[tauri::command]
-fn get_model_status(state: State<'_, AppState>, profile_id: String) -> Result<InstallState, String> {
+fn get_model_status(
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<InstallState, String> {
     let config = config::load(&state.paths)?;
     let profile = models::model_catalog()
         .into_iter()
@@ -189,7 +195,9 @@ fn get_model_status(state: State<'_, AppState>, profile_id: String) -> Result<In
     if profile.files.is_empty() {
         return Ok(InstallState::NotInstalled);
     }
-    if has_persisted_spec_install(&config, &target, &profile) && has_spec_install_manifest(&target, &profile) {
+    if has_persisted_spec_install(&config, &target, &profile)
+        && has_spec_install_manifest(&target, &profile)
+    {
         return Ok(InstallState::Ready);
     }
     if spec_dir_has_partial_files(&target, &profile) {
@@ -197,7 +205,9 @@ fn get_model_status(state: State<'_, AppState>, profile_id: String) -> Result<In
             message: "Previous download did not finish.".into(),
         });
     }
-    if profile.engine == models::EngineKind::OpenAiCompatible && !config.openai_endpoint.trim().is_empty() {
+    if profile.engine == models::EngineKind::OpenAiCompatible
+        && !config.openai_endpoint.trim().is_empty()
+    {
         return Ok(InstallState::Ready);
     }
     Ok(InstallState::NotInstalled)
@@ -284,7 +294,10 @@ fn write_clipboard_text(text: String) -> Result<(), String> {
 
 #[tauri::command]
 fn take_pending_request(state: State<'_, AppState>) -> Result<Option<PendingRequest>, String> {
-    let mut pending = state.pending.lock().map_err(|_| "Pending state is poisoned")?;
+    let mut pending = state
+        .pending
+        .lock()
+        .map_err(|_| "Pending state is poisoned")?;
     Ok(pending.take())
 }
 
@@ -319,15 +332,38 @@ fn reveal_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn read_runtime_log(state: State<'_, AppState>, name: String) -> Result<String, String> {
+    let file_name = match name.as_str() {
+        "ct2-server.log" | "llama-server.log" => name,
+        _ => return Err("Unknown runtime log.".into()),
+    };
+    let path = runtime::runtime_log_path(&state.paths, &file_name);
+    if !path.exists() {
+        return Ok("".into());
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|err| format!("Could not read {}: {err}", path.display()))?;
+    let mut lines = content.lines().rev().take(120).collect::<Vec<_>>();
+    lines.reverse();
+    Ok(lines.join("\n"))
+}
+
+#[tauri::command]
 fn cancel_model_download(state: State<'_, AppState>) -> Result<(), String> {
-    let mut download = state.download.lock().map_err(|_| "Download state is poisoned")?;
+    let mut download = state
+        .download
+        .lock()
+        .map_err(|_| "Download state is poisoned")?;
     download.cancel_requested = true;
     Ok(())
 }
 
 #[tauri::command]
 fn cancel_model_install(state: State<'_, AppState>, profile_id: String) -> Result<(), String> {
-    let mut download = state.download.lock().map_err(|_| "Download state is poisoned")?;
+    let mut download = state
+        .download
+        .lock()
+        .map_err(|_| "Download state is poisoned")?;
     if download.active_model.as_deref() == Some(profile_id.as_str()) {
         download.cancel_requested = true;
     }
@@ -335,7 +371,11 @@ fn cancel_model_install(state: State<'_, AppState>, profile_id: String) -> Resul
 }
 
 #[tauri::command]
-async fn install_model(app: AppHandle, state: State<'_, AppState>, profile_id: String) -> Result<String, String> {
+async fn install_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<String, String> {
     let profile = models::model_catalog()
         .into_iter()
         .find(|item| item.id == profile_id)
@@ -363,19 +403,25 @@ fn uninstall_model(state: State<'_, AppState>, profile_id: String) -> Result<(),
 }
 
 #[tauri::command]
-async fn download_catalog_model(app: AppHandle, state: State<'_, AppState>, model_id: String) -> Result<String, String> {
+async fn download_catalog_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    model_id: String,
+) -> Result<String, String> {
     let base_config = config::load(&state.paths)?;
     let profile = models::catalog()
         .into_iter()
         .find(|item| item.id == model_id)
         .ok_or_else(|| "Unknown model profile".to_string())?;
-    let repo = profile
-        .hf_repo
-        .clone()
-        .ok_or_else(|| "This model profile is not downloadable from the built-in catalog".to_string())?;
+    let repo = profile.hf_repo.clone().ok_or_else(|| {
+        "This model profile is not downloadable from the built-in catalog".to_string()
+    })?;
 
     {
-        let mut download = state.download.lock().map_err(|_| "Download state is poisoned")?;
+        let mut download = state
+            .download
+            .lock()
+            .map_err(|_| "Download state is poisoned")?;
         if download.active_model.is_some() {
             return Err("Another model download is already running.".into());
         }
@@ -387,13 +433,23 @@ async fn download_catalog_model(app: AppHandle, state: State<'_, AppState>, mode
     let app_for_download = app.clone();
     let runtime = state.runtime.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        download_huggingface_repo(&app_for_download, &paths, &runtime, &profile, &repo, base_config)
+        download_huggingface_repo(
+            &app_for_download,
+            &paths,
+            &runtime,
+            &profile,
+            &repo,
+            base_config,
+        )
     })
     .await
     .map_err(|err| err.to_string())?;
 
     {
-        let mut download = state.download.lock().map_err(|_| "Download state is poisoned")?;
+        let mut download = state
+            .download
+            .lock()
+            .map_err(|_| "Download state is poisoned")?;
         download.active_model = None;
         download.cancel_requested = false;
     }
@@ -407,7 +463,10 @@ async fn install_spec_model(
     profile: ModelCatalogEntry,
 ) -> Result<String, String> {
     {
-        let mut download = state.download.lock().map_err(|_| "Download state is poisoned")?;
+        let mut download = state
+            .download
+            .lock()
+            .map_err(|_| "Download state is poisoned")?;
         if download.active_model.is_some() {
             return Err("Another model download is already running.".into());
         }
@@ -424,7 +483,10 @@ async fn install_spec_model(
     .map_err(|err| err.to_string())?;
 
     {
-        let mut download = state.download.lock().map_err(|_| "Download state is poisoned")?;
+        let mut download = state
+            .download
+            .lock()
+            .map_err(|_| "Download state is poisoned")?;
         download.active_model = None;
         download.cancel_requested = false;
     }
@@ -447,7 +509,15 @@ fn download_spec_model_files(
     clear_install_manifest(&target);
     ensure_enough_disk_space(paths, &target, profile)?;
 
-    emit_download(app, &profile.id, "starting", "Checking files", 0.02, 0, Some(profile.estimated_download_bytes));
+    emit_download(
+        app,
+        &profile.id,
+        "starting",
+        "Checking files",
+        0.02,
+        0,
+        Some(profile.estimated_download_bytes),
+    );
 
     let client = reqwest::blocking::Client::new();
     let mut downloaded = existing_spec_downloaded_bytes(&target, profile);
@@ -459,7 +529,15 @@ fn download_spec_model_files(
 
     for file in &profile.files {
         if is_download_cancelled(app, &profile.id)? {
-            emit_download(app, &profile.id, "cancelled", "Download cancelled", 0.0, downloaded, total);
+            emit_download(
+                app,
+                &profile.id,
+                "cancelled",
+                "Download cancelled",
+                0.0,
+                downloaded,
+                total,
+            );
             return Err("Download cancelled.".into());
         }
 
@@ -476,9 +554,16 @@ fn download_spec_model_files(
 
         let part_path = local_path.with_extension(format!(
             "{}part",
-            local_path.extension().and_then(|value| value.to_str()).map(|value| format!("{value}.")).unwrap_or_default()
+            local_path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| format!("{value}."))
+                .unwrap_or_default()
         ));
-        let mut resume_from = part_path.metadata().map(|metadata| metadata.len()).unwrap_or_default();
+        let mut resume_from = part_path
+            .metadata()
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
         if resume_from > 0 {
             downloaded += resume_from;
             emit_download(
@@ -492,7 +577,10 @@ fn download_spec_model_files(
             );
         }
 
-        let url = format!("https://huggingface.co/{}/resolve/main/{}", file.repo, file.path);
+        let url = format!(
+            "https://huggingface.co/{}/resolve/main/{}",
+            file.repo, file.path
+        );
         let mut request = client.get(url);
         if resume_from > 0 {
             request = request.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
@@ -517,7 +605,15 @@ fn download_spec_model_files(
         let mut file_downloaded = resume_from;
         loop {
             if is_download_cancelled(app, &profile.id)? {
-                emit_download(app, &profile.id, "cancelled", "Download cancelled", 0.0, downloaded, total);
+                emit_download(
+                    app,
+                    &profile.id,
+                    "cancelled",
+                    "Download cancelled",
+                    0.0,
+                    downloaded,
+                    total,
+                );
                 return Err("Download cancelled.".into());
             }
             let read = response
@@ -591,7 +687,12 @@ fn download_huggingface_repo(
     } else {
         files
             .into_iter()
-            .filter(|file| profile.download_filenames.iter().any(|name| name == &file.path))
+            .filter(|file| {
+                profile
+                    .download_filenames
+                    .iter()
+                    .any(|name| name == &file.path)
+            })
             .collect::<Vec<_>>()
     };
     if files.is_empty() {
@@ -613,14 +714,26 @@ fn download_huggingface_repo(
 
     for file in files {
         if is_download_cancelled(app, &profile.id)? {
-            emit_download(app, &profile.id, "cancelled", "Download cancelled", 0.0, downloaded, total);
+            emit_download(
+                app,
+                &profile.id,
+                "cancelled",
+                "Download cancelled",
+                0.0,
+                downloaded,
+                total,
+            );
             return Err("Download cancelled.".into());
         }
 
         let local_path = target.join(&file.path);
         if let Some(size) = file.size {
             if local_path.exists()
-                && local_path.metadata().map(|metadata| metadata.len()).unwrap_or_default() == size
+                && local_path
+                    .metadata()
+                    .map(|metadata| metadata.len())
+                    .unwrap_or_default()
+                    == size
             {
                 continue;
             }
@@ -638,7 +751,11 @@ fn download_huggingface_repo(
             .map_err(|err| format!("Hugging Face returned an error for {}: {err}", file.path))?;
         let part_path = local_path.with_extension(format!(
             "{}part",
-            local_path.extension().and_then(|value| value.to_str()).map(|value| format!("{value}.")).unwrap_or_default()
+            local_path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| format!("{value}."))
+                .unwrap_or_default()
         ));
         let mut output = File::create(&part_path)
             .map_err(|err| format!("Could not create {}: {err}", local_path.display()))?;
@@ -646,7 +763,15 @@ fn download_huggingface_repo(
         let mut file_downloaded = 0_u64;
         loop {
             if is_download_cancelled(app, &profile.id)? {
-                emit_download(app, &profile.id, "cancelled", "Download cancelled", 0.0, downloaded, total);
+                emit_download(
+                    app,
+                    &profile.id,
+                    "cancelled",
+                    "Download cancelled",
+                    0.0,
+                    downloaded,
+                    total,
+                );
                 return Err("Download cancelled.".into());
             }
             let read = response
@@ -752,7 +877,10 @@ fn download_huggingface_repo(
     Ok(target.display().to_string())
 }
 
-fn huggingface_files(client: &reqwest::blocking::Client, repo: &str) -> Result<Vec<HfFile>, String> {
+fn huggingface_files(
+    client: &reqwest::blocking::Client,
+    repo: &str,
+) -> Result<Vec<HfFile>, String> {
     let url = format!("https://huggingface.co/api/models/{repo}");
     let value: Value = client
         .get(url)
@@ -801,7 +929,10 @@ fn download_ratio(downloaded: u64, total: Option<u64>) -> f64 {
 
 fn is_download_cancelled(app: &AppHandle, model_id: &str) -> Result<bool, String> {
     let state = app.state::<AppState>();
-    let download = state.download.lock().map_err(|_| "Download state is poisoned")?;
+    let download = state
+        .download
+        .lock()
+        .map_err(|_| "Download state is poisoned")?;
     Ok(download.active_model.as_deref() == Some(model_id) && download.cancel_requested)
 }
 
@@ -837,7 +968,11 @@ fn emit_translation_progress(app: &AppHandle, status: &str, translated_text: &st
     );
 }
 
-fn ensure_enough_disk_space(paths: &AppPaths, target: &Path, profile: &ModelCatalogEntry) -> Result<(), String> {
+fn ensure_enough_disk_space(
+    paths: &AppPaths,
+    target: &Path,
+    profile: &ModelCatalogEntry,
+) -> Result<(), String> {
     let current_bytes = current_model_dir_bytes(target)?;
     let needed = profile
         .estimated_disk_bytes
@@ -881,7 +1016,10 @@ fn free_disk_bytes(path: &Path) -> Result<u64, String> {
     let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     let rc = unsafe { libc::statvfs(c_path.as_ptr(), stats.as_mut_ptr()) };
     if rc != 0 {
-        return Err(format!("Could not inspect free space for {}", path.display()));
+        return Err(format!(
+            "Could not inspect free space for {}",
+            path.display()
+        ));
     }
     let stats = unsafe { stats.assume_init() };
     Ok((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
@@ -907,7 +1045,10 @@ fn read_selection_with_fallback() -> Result<(String, Option<String>), String> {
             )),
             _ => Ok((
                 String::new(),
-                Some("Waylate could not read selected text. Paste text manually or copy it first.".into()),
+                Some(
+                    "Waylate could not read selected text. Paste text manually or copy it first."
+                        .into(),
+                ),
             )),
         },
     }
@@ -943,11 +1084,18 @@ fn show_window(app: &AppHandle, title: &str) -> Result<(), String> {
 }
 
 fn handle_args(app: &AppHandle, args: &[String]) {
-    let command = args.iter().skip(1).find(|arg| !arg.starts_with('-')).map(String::as_str);
+    let command = args
+        .iter()
+        .skip(1)
+        .find(|arg| !arg.starts_with('-'))
+        .map(String::as_str);
     match command {
         Some("translate-selection") => {
             let (source_text, notice) = read_selection_with_fallback().unwrap_or_else(|err| {
-                (String::new(), Some(format!("Could not read Wayland selection: {err}")))
+                (
+                    String::new(),
+                    Some(format!("Could not read Wayland selection: {err}")),
+                )
             });
             let _ = set_pending(
                 app,
@@ -984,7 +1132,8 @@ fn handle_args(app: &AppHandle, args: &[String]) {
 }
 
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let translate = MenuItemBuilder::with_id("translate_clipboard", "Translate clipboard").build(app)?;
+    let translate =
+        MenuItemBuilder::with_id("translate_clipboard", "Translate clipboard").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
     let menu = MenuBuilder::new(app)
@@ -1065,7 +1214,18 @@ fn environment_report(paths: &AppPaths, config: &AppConfig) -> EnvironmentReport
         has_llama_server: runtime_report.llama_binary_found,
         ct2_cuda_devices: runtime_report.ct2_cuda_devices,
         llama_cuda_reported: runtime_report.llama_cuda_reported,
+        total_memory_bytes: system_total_memory_bytes(),
     }
+}
+
+fn system_total_memory_bytes() -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::sysinfo>::uninit();
+    let result = unsafe { libc::sysinfo(info.as_mut_ptr()) };
+    if result != 0 {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    Some((info.totalram as u128 * info.mem_unit as u128).min(u64::MAX as u128) as u64)
 }
 
 fn has_command(name: &str) -> bool {
@@ -1077,7 +1237,11 @@ fn has_command(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn collect_model_states(paths: &AppPaths, config: &AppConfig, catalog: &[ModelProfile]) -> Vec<ModelInstallState> {
+fn collect_model_states(
+    paths: &AppPaths,
+    config: &AppConfig,
+    catalog: &[ModelProfile],
+) -> Vec<ModelInstallState> {
     catalog
         .iter()
         .map(|profile| ModelInstallState {
@@ -1088,7 +1252,10 @@ fn collect_model_states(paths: &AppPaths, config: &AppConfig, catalog: &[ModelPr
 }
 
 fn install_status(paths: &AppPaths, config: &AppConfig, profile: &ModelProfile) -> &'static str {
-    if let Some(spec) = models::model_catalog().into_iter().find(|entry| entry.id == profile.id) {
+    if let Some(spec) = models::model_catalog()
+        .into_iter()
+        .find(|entry| entry.id == profile.id)
+    {
         return spec_install_status(paths, config, &spec);
     }
     if profile.provider == ProviderKind::CTranslate2
@@ -1127,7 +1294,10 @@ fn install_status(paths: &AppPaths, config: &AppConfig, profile: &ModelProfile) 
             }
         }
         ProviderKind::Yandex => {
-            if config.api_provider_enabled && secrets::has("yandex") && !config.yandex_folder_id.trim().is_empty() {
+            if config.api_provider_enabled
+                && secrets::has("yandex")
+                && !config.yandex_folder_id.trim().is_empty()
+            {
                 "installed"
             } else {
                 "missing"
@@ -1138,9 +1308,15 @@ fn install_status(paths: &AppPaths, config: &AppConfig, profile: &ModelProfile) 
     }
 }
 
-fn spec_install_status(paths: &AppPaths, config: &AppConfig, profile: &ModelCatalogEntry) -> &'static str {
+fn spec_install_status(
+    paths: &AppPaths,
+    config: &AppConfig,
+    profile: &ModelCatalogEntry,
+) -> &'static str {
     let target = paths.models_dir.join(&profile.id);
-    if has_persisted_spec_install(config, &target, profile) && has_spec_install_manifest(&target, profile) {
+    if has_persisted_spec_install(config, &target, profile)
+        && has_spec_install_manifest(&target, profile)
+    {
         return "installed";
     }
     if spec_dir_has_partial_files(&target, profile) {
@@ -1188,10 +1364,7 @@ fn has_valid_install_manifest(path: &Path, profile: &ModelProfile) -> bool {
     if manifest.files.is_empty() {
         return false;
     }
-    manifest
-        .files
-        .iter()
-        .all(|file| path.join(file).is_file())
+    manifest.files.iter().all(|file| path.join(file).is_file())
         && profile
             .install_check_files
             .iter()
@@ -1218,10 +1391,17 @@ fn has_spec_install_manifest(path: &Path, profile: &ModelCatalogEntry) -> bool {
     if manifest.version != 1 || manifest.files.is_empty() {
         return false;
     }
-    profile.files.iter().all(|file| path.join(&file.destination).is_file())
+    profile
+        .files
+        .iter()
+        .all(|file| path.join(&file.destination).is_file())
 }
 
-fn has_persisted_spec_install(config: &AppConfig, path: &Path, profile: &ModelCatalogEntry) -> bool {
+fn has_persisted_spec_install(
+    config: &AppConfig,
+    path: &Path,
+    profile: &ModelCatalogEntry,
+) -> bool {
     let Some(metadata) = config.installed_models.get(&profile.id) else {
         return false;
     };
@@ -1270,14 +1450,21 @@ fn verify_spec_file(path: &Path, file: &models::ModelFile) -> Result<(), String>
 }
 
 fn file_sha256(path: &Path) -> Result<String, String> {
-    let mut file = File::open(path)
-        .map_err(|err| format!("Could not open {} for SHA256 verification: {err}", path.display()))?;
+    let mut file = File::open(path).map_err(|err| {
+        format!(
+            "Could not open {} for SHA256 verification: {err}",
+            path.display()
+        )
+    })?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 128 * 1024];
     loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|err| format!("Could not read {} for SHA256 verification: {err}", path.display()))?;
+        let read = file.read(&mut buffer).map_err(|err| {
+            format!(
+                "Could not read {} for SHA256 verification: {err}",
+                path.display()
+            )
+        })?;
         if read == 0 {
             break;
         }
@@ -1287,7 +1474,10 @@ fn file_sha256(path: &Path) -> Result<String, String> {
 }
 
 fn spec_dir_has_partial_files(path: &Path, profile: &ModelCatalogEntry) -> bool {
-    profile.files.iter().any(|file| path.join(&file.destination).exists())
+    profile
+        .files
+        .iter()
+        .any(|file| path.join(&file.destination).exists())
         || dir_has_any_files(path)
 }
 
@@ -1341,7 +1531,11 @@ fn write_spec_install_manifest(path: &Path, profile: &ModelCatalogEntry) -> Resu
     let manifest = InstallManifest {
         version: 1,
         repo: "model-catalog-entry".into(),
-        files: profile.files.iter().map(|file| file.destination.clone()).collect(),
+        files: profile
+            .files
+            .iter()
+            .map(|file| file.destination.clone())
+            .collect(),
     };
     let raw = serde_json::to_vec_pretty(&manifest).map_err(|err| err.to_string())?;
     std::fs::write(install_manifest_path(path), raw).map_err(|err| err.to_string())
@@ -1359,7 +1553,11 @@ fn persist_spec_install_metadata(
             install_dir: install_dir.display().to_string(),
             manifest_version: 1,
             installed_at: Utc::now().to_rfc3339(),
-            files: profile.files.iter().map(|file| file.destination.clone()).collect(),
+            files: profile
+                .files
+                .iter()
+                .map(|file| file.destination.clone())
+                .collect(),
         },
     );
     config::save(paths, &config)
@@ -1404,8 +1602,11 @@ pub fn run() {
         })
         .setup(|app| {
             let paths = AppPaths::new().map_err(|err| Box::<dyn std::error::Error>::from(err))?;
-            paths.ensure().map_err(|err| Box::<dyn std::error::Error>::from(err))?;
-            history::init(&paths.history_db).map_err(|err| Box::<dyn std::error::Error>::from(err))?;
+            paths
+                .ensure()
+                .map_err(|err| Box::<dyn std::error::Error>::from(err))?;
+            history::init(&paths.history_db)
+                .map_err(|err| Box::<dyn std::error::Error>::from(err))?;
             let runtime = Arc::new(RuntimeManager::new());
             if let Ok(config) = config::load(&paths) {
                 let _ = autostart::sync(&paths, config.autostart);
@@ -1444,6 +1645,7 @@ pub fn run() {
             clear_history,
             delete_history_entry,
             reveal_path,
+            read_runtime_log,
             download_catalog_model,
             cancel_model_download
         ])
