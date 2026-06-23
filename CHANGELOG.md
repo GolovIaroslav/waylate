@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3
+
+- Eliminate O(N²) KV-cache copies in the NLLB ONNX decoder: self-attention tensors are now moved directly between decoder steps instead of being extracted to Vec<f32> and re-uploaded on every token, cutting data-movement from ~10 GB to a constant per translation.
+- Switch releases from tar.gz to AppImage — download once, mark executable, run.
+
 ## 0.1.2
 
 - Add GitHub CI, Dependabot, issue templates, pull request template, contributing guide and security notes.

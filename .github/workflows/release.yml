@@ -16,7 +16,19 @@ jobs:
       - name: Install build tools
         run: |
           pacman -Syu --noconfirm
-          pacman -S --noconfirm base-devel git nodejs npm rust webkit2gtk-4.1 gtk3 libayatana-appindicator wl-clipboard python desktop-file-utils
+          pacman -S --noconfirm \
+            base-devel git nodejs npm rust \
+            webkit2gtk-4.1 gtk3 libayatana-appindicator \
+            wl-clipboard python desktop-file-utils \
+            fuse2 wget squashfs-tools
+
+      - name: Install linuxdeploy
+        run: |
+          wget -q "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+          wget -q "https://github.com/linuxdeploy/linuxdeploy-plugin-gtk/releases/download/continuous/linuxdeploy-plugin-gtk-x86_64.AppImage"
+          chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-gtk-x86_64.AppImage
+          mv linuxdeploy-x86_64.AppImage /usr/local/bin/
+          mv linuxdeploy-plugin-gtk-x86_64.AppImage /usr/local/bin/
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,24 +36,34 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build Waylate
-        run: npm run tauri build -- --no-bundle
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          NO_STRIP: "true"
+        run: npm run tauri build -- --bundles appimage
 
-      - name: Package release archive
-        run: npm run release:archive
+      - name: Rename and checksum AppImage
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          SRC=$(ls src-tauri/target/release/bundle/appimage/*.AppImage | head -1)
+          DEST="dist/Waylate-${VERSION}-x86_64.AppImage"
+          mkdir -p dist
+          cp "$SRC" "$DEST"
+          sha256sum "$DEST" > "${DEST}.sha256"
+          echo "APPIMAGE=$DEST" >> $GITHUB_ENV
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: waylate-linux-release
+          name: waylate-linux-appimage
           path: |
-            dist/*.tar.gz
-            dist/*.sha256
+            dist/*.AppImage
+            dist/*.AppImage.sha256
 
       - name: Attach to GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.tar.gz
-            dist/*.sha256
+            dist/*.AppImage
+            dist/*.AppImage.sha256
