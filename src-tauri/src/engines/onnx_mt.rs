@@ -3,9 +3,9 @@ use crate::{
     models::{EngineKind, ModelCatalogEntry},
 };
 use ort::{
-    execution_providers::CUDAExecutionProvider,
+    execution_providers::{CUDAExecutionProvider, ROCmExecutionProvider},
     session::{builder::GraphOptimizationLevel, Session},
-    value::{DynTensor, Tensor, TensorElementType, ValueType},
+    value::{DynValue, Tensor, TensorElementType, ValueType},
 };
 use std::{
     collections::HashMap,
@@ -16,8 +16,15 @@ use tokenizers::Tokenizer;
 
 static MODEL_CACHE: OnceLock<Mutex<HashMap<String, LoadedOnnxModel>>> = OnceLock::new();
 
-/// Load the model into cache without translating — called in the background at startup
-/// so the first real translation doesn't pay the cold-load cost.
+pub fn active_device(profile_id: &str) -> Option<String> {
+    MODEL_CACHE
+        .get()?
+        .lock()
+        .ok()?
+        .get(profile_id)
+        .map(|m| m.device.clone())
+}
+
 pub fn preload(entry: &ModelCatalogEntry, paths: &AppPaths) {
     let model_dir = paths.models_dir.join(&entry.id);
     if !model_dir.is_dir() {
@@ -76,16 +83,49 @@ pub fn translate_with_progress(
     model.translate(text, source_lang, target_lang, on_progress)
 }
 
+// ---------------------------------------------------------------------------
+// Model metadata precomputed at load time
+// ---------------------------------------------------------------------------
+
+struct KvInputMeta {
+    name: String,
+    is_encoder: bool,
+    initial_dims: Vec<usize>,
+    initial_ty: TensorElementType,
+}
+
 struct LoadedOnnxModel {
     tokenizer: Tokenizer,
     encoder: Session,
     decoder: Session,
     eos_token_id: i64,
+    device: String,
+    hidden_size: usize,
+    has_use_cache_branch: bool,
+    kv_inputs: Vec<KvInputMeta>,
 }
+
+// ---------------------------------------------------------------------------
+// Per-translation KV cache
+//
+// Self-attention KV grows by one position each step. We store these as
+// Option<DynValue> and MOVE them into decoder inputs rather than cloning —
+// eliminating the O(N²) Rust-side memcpy that made the old code slow.
+//
+// Encoder cross-attention KV is fixed-size (doesn't grow). We keep it as
+// Vec<f32> and re-upload it each step. The copy is O(src_len) — constant.
+// ---------------------------------------------------------------------------
 
 struct CacheTensor {
     shape: Vec<usize>,
     data: Vec<f32>,
+}
+
+struct KvCache {
+    /// Encoder cross-attention KV — fixed size, re-uploaded from Vec<f32> each step.
+    encoder: HashMap<String, CacheTensor>,
+    /// Self-attention KV — moved into decoder inputs each step, no data copy.
+    self_attn: HashMap<String, Option<DynValue>>,
 }
 
 impl LoadedOnnxModel {
@@ -111,19 +151,63 @@ impl LoadedOnnxModel {
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|err| format!("Could not load tokenizer for {}: {err}", entry.name))?;
 
-        let threads = intra_op_threads();
-        let encoder = load_session(&encoder_path, threads)
+        let intra = intra_op_threads();
+        let (encoder, device) = load_session(&encoder_path, intra)
             .map_err(|err| format!("Could not load encoder model: {err}"))?;
-        let decoder = load_session(&decoder_path, threads)
+        let (decoder, _) = load_session(&decoder_path, intra)
             .map_err(|err| format!("Could not load decoder model: {err}"))?;
 
         let eos_token_id = token_id(&tokenizer, "</s>")?;
+
+        let has_use_cache_branch = decoder
+            .inputs()
+            .iter()
+            .any(|o| o.name() == "use_cache_branch");
+
+        let mut hidden_size: usize = 0;
+        let mut kv_inputs: Vec<KvInputMeta> = Vec::new();
+
+        for outlet in decoder.inputs() {
+            let name = outlet.name().to_string();
+            match outlet.dtype() {
+                ValueType::Tensor { ty, shape, .. } => {
+                    if name == "encoder_hidden_states" {
+                        if let Some(&dim) = shape.as_ref().last() {
+                            if dim > 0 {
+                                hidden_size = dim as usize;
+                            }
+                        }
+                    }
+                    if name.contains("past_key_values") {
+                        let is_encoder = name.contains(".encoder.");
+                        let initial_dims = concrete_initial_cache_dims(shape.as_ref());
+                        kv_inputs.push(KvInputMeta {
+                            name,
+                            is_encoder,
+                            initial_dims,
+                            initial_ty: *ty,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if hidden_size == 0 {
+            return Err(
+                "Could not determine encoder hidden size from decoder model spec".into(),
+            );
+        }
 
         Ok(Self {
             tokenizer,
             encoder,
             decoder,
             eos_token_id,
+            device,
+            hidden_size,
+            has_use_cache_branch,
+            kv_inputs,
         })
     }
 
@@ -146,27 +230,37 @@ impl LoadedOnnxModel {
             encoding.get_ids().iter().map(|id| i64::from(*id)).collect();
         encoder_input_ids.push(self.eos_token_id);
         encoder_input_ids.push(source_lang_id);
-        let encoder_attention_mask = vec![1_i64; encoder_input_ids.len()];
+        let encoder_seq_len = encoder_input_ids.len();
+        let encoder_attention_mask = vec![1_i64; encoder_seq_len];
 
         let encoder_hidden_states =
             self.run_encoder(&encoder_input_ids, &encoder_attention_mask)?;
 
         let mut decoder_tokens = vec![self.eos_token_id, target_lang_id];
-        let mut cache = None;
-        for _ in 0..256 {
+        let mut kv = KvCache {
+            encoder: HashMap::new(),
+            self_attn: HashMap::new(),
+        };
+
+        for step in 0..512_usize {
+            let use_cache = step > 0;
             let next_token = self.decode_next_token(
                 &decoder_tokens,
                 &encoder_attention_mask,
                 &encoder_hidden_states,
-                &mut cache,
+                encoder_seq_len,
+                &mut kv,
+                use_cache,
             )?;
             if next_token == self.eos_token_id {
                 break;
             }
             decoder_tokens.push(next_token);
-            let partial = self.decode_generated_tokens(&decoder_tokens)?;
-            if !partial.is_empty() {
-                on_progress(&partial)?;
+            if step % 3 == 0 {
+                let partial = self.decode_generated_tokens(&decoder_tokens)?;
+                if !partial.is_empty() {
+                    on_progress(&partial)?;
+                }
             }
         }
 
@@ -178,35 +272,35 @@ impl LoadedOnnxModel {
         input_ids: &[i64],
         attention_mask: &[i64],
     ) -> Result<Vec<f32>, String> {
-        let mut inputs = HashMap::<String, DynTensor>::new();
-        inputs.insert(
-            "input_ids".into(),
-            Tensor::from_array(([1_usize, input_ids.len()], input_ids.to_vec()))
-                .map_err(|err| format!("Could not build encoder input_ids tensor: {err}"))?
-                .upcast(),
-        );
+        let mut inputs = HashMap::<String, DynValue>::new();
+        inputs.insert("input_ids".into(), mk_i64_tensor_1d_as_2d(input_ids)?);
         inputs.insert(
             "attention_mask".into(),
-            Tensor::from_array(([1_usize, attention_mask.len()], attention_mask.to_vec()))
-                .map_err(|err| format!("Could not build encoder attention_mask tensor: {err}"))?
-                .upcast(),
+            mk_i64_tensor_1d_as_2d(attention_mask)?,
         );
 
         let outputs = self
             .encoder
             .run(inputs)
             .map_err(|err| format!("ONNX encoder inference failed: {err}"))?;
-        let first_output = outputs.values().next();
-        let hidden = if let Some(hidden) = outputs.get("last_hidden_state") {
-            hidden
+
+        // Find the hidden-state key without keeping a borrow past this point.
+        let hs_key: String = if outputs.contains_key("last_hidden_state") {
+            "last_hidden_state".to_string()
         } else {
-            first_output
-                .as_deref()
+            outputs
+                .keys()
+                .next()
+                .map(|k| { let s: &str = k.as_ref(); s.to_string() })
                 .ok_or_else(|| "ONNX encoder returned no outputs".to_string())?
         };
+
+        let hidden = outputs
+            .get(&hs_key)
+            .ok_or_else(|| "ONNX encoder hidden state key disappeared".to_string())?;
         let array = hidden
             .try_extract_array::<f32>()
-            .map_err(|err| format!("Could not read encoder output tensor: {err}"))?;
+            .map_err(|err| format!("Could not read encoder output: {err}"))?;
         Ok(array.iter().copied().collect())
     }
 
@@ -215,16 +309,11 @@ impl LoadedOnnxModel {
         decoder_tokens: &[i64],
         encoder_attention_mask: &[i64],
         encoder_hidden_states: &[f32],
-        cache: &mut Option<HashMap<String, CacheTensor>>,
+        encoder_seq_len: usize,
+        kv: &mut KvCache,
+        use_cache: bool,
     ) -> Result<i64, String> {
-        let mut inputs = HashMap::<String, DynTensor>::new();
-        let hidden_size = infer_hidden_size(
-            self.decoder.inputs(),
-            encoder_hidden_states.len(),
-            encoder_attention_mask.len(),
-        )?;
-        let use_cache = cache.is_some();
-        let decoder_input_ids = if use_cache {
+        let decoder_input_ids: Vec<i64> = if use_cache {
             vec![*decoder_tokens
                 .last()
                 .ok_or_else(|| "Decoder input is empty".to_string())?]
@@ -232,84 +321,73 @@ impl LoadedOnnxModel {
             decoder_tokens.to_vec()
         };
 
-        for outlet in self.decoder.inputs() {
-            let name = outlet.name();
-            if name == "input_ids" {
-                inputs.insert(
-                    name.into(),
-                    Tensor::from_array((
-                        [1_usize, decoder_input_ids.len()],
-                        decoder_input_ids.clone(),
-                    ))
-                    .map_err(|err| format!("Could not build decoder input_ids tensor: {err}"))?
-                    .upcast(),
-                );
-                continue;
-            }
-            if name == "encoder_attention_mask" {
-                inputs.insert(
-                    name.into(),
-                    Tensor::from_array((
-                        [1_usize, encoder_attention_mask.len()],
-                        encoder_attention_mask.to_vec(),
-                    ))
-                    .map_err(|err| {
-                        format!("Could not build decoder encoder_attention_mask tensor: {err}")
-                    })?
-                    .upcast(),
-                );
-                continue;
-            }
-            if name == "encoder_hidden_states" {
-                inputs.insert(
-                    name.into(),
-                    Tensor::from_array((
-                        [1_usize, encoder_attention_mask.len(), hidden_size],
-                        encoder_hidden_states.to_vec(),
-                    ))
-                    .map_err(|err| {
-                        format!("Could not build decoder encoder_hidden_states tensor: {err}")
-                    })?
-                    .upcast(),
-                );
-                continue;
-            }
-            if name == "use_cache_branch" {
-                inputs.insert(
-                    name.into(),
-                    Tensor::from_array(([1_usize], vec![use_cache]))
-                        .map_err(|err| {
-                            format!("Could not build decoder use_cache_branch tensor: {err}")
-                        })?
-                        .upcast(),
-                );
-                continue;
-            }
-            if name.contains("past_key_values") {
-                let tensor = if let Some(tensor) = cache.as_ref().and_then(|cache| cache.get(name))
-                {
-                    cache_tensor_value(tensor)?
+        let mut inputs = HashMap::<String, DynValue>::new();
+
+        inputs.insert("input_ids".into(), mk_i64_tensor_1d_as_2d(&decoder_input_ids)?);
+        inputs.insert(
+            "encoder_attention_mask".into(),
+            mk_i64_tensor_1d_as_2d(encoder_attention_mask)?,
+        );
+        inputs.insert(
+            "encoder_hidden_states".into(),
+            mk_f32_tensor_3d(encoder_seq_len, self.hidden_size, encoder_hidden_states)?,
+        );
+
+        if self.has_use_cache_branch {
+            inputs.insert(
+                "use_cache_branch".into(),
+                Tensor::from_array(([1_usize], vec![use_cache]))
+                    .map_err(|e| format!("Could not build use_cache_branch tensor: {e}"))?
+                    .upcast()
+                    .into(),
+            );
+        }
+
+        // Build KV cache inputs.
+        //
+        // Self-attention: MOVE the DynValue out of the Option slot (swap to None).
+        // The previous step's ORT tensor is directly re-used as this step's input
+        // without any Vec<f32> extraction — the main perf optimisation.
+        //
+        // Encoder cross-attention: fixed size (doesn't grow), re-uploaded from Vec<f32>.
+        for meta in &self.kv_inputs {
+            let tensor: DynValue = if meta.is_encoder {
+                // Fixed-size encoder cross-attn — re-upload from Vec<f32>.
+                if let Some(ct) = kv.encoder.get(&meta.name) {
+                    mk_f32_tensor_dyn(&ct.shape, &ct.data)?
                 } else {
-                    initial_cache_tensor_for_outlet(outlet)?
-                };
-                inputs.insert(name.into(), tensor);
-            }
+                    initial_cache_tensor(&meta.initial_dims, meta.initial_ty)?
+                }
+            } else {
+                // Growing self-attn — take() moves the DynValue without copying data.
+                match kv.self_attn.get_mut(&meta.name) {
+                    Some(slot) if slot.is_some() => slot.take().unwrap(),
+                    _ => initial_cache_tensor(&meta.initial_dims, meta.initial_ty)?,
+                }
+            };
+            inputs.insert(meta.name.clone(), tensor);
         }
 
         let outputs = self
             .decoder
             .run(inputs)
             .map_err(|err| format!("ONNX decoder inference failed: {err}"))?;
-        let best_id = {
-            let first_output = outputs.values().next();
-            let logits = if let Some(logits) = outputs.get("logits") {
-                logits
+
+        // Phase 1: compute argmax (borrows outputs; borrow released at end of this block).
+        let best_id: i64 = {
+            let logits_key: String = if outputs.contains_key("logits") {
+                "logits".to_string()
             } else {
-                first_output
-                    .as_deref()
-                    .ok_or_else(|| "ONNX decoder returned no logits".to_string())?
+                outputs
+                    .keys()
+                    .next()
+                    .map(|k| { let s: &str = k.as_ref(); s.to_string() })
+                    .ok_or_else(|| "ONNX decoder returned no outputs".to_string())?
             };
-            let logits = logits
+            let logits_val = outputs
+                .get(&logits_key)
+                .ok_or_else(|| "ONNX decoder logits disappeared".to_string())?;
+            let logits = logits_val
                 .try_extract_array::<f32>()
                 .map_err(|err| format!("Could not read decoder logits: {err}"))?;
             let shape = logits.shape();
@@ -320,17 +398,56 @@ impl LoadedOnnxModel {
                 .last()
                 .ok_or_else(|| "Decoder logits had no vocabulary dimension".to_string())?;
             let start = logits.len().saturating_sub(vocab);
-            let mut best_id = 0_i64;
+            let mut best = 0_i64;
             let mut best_score = f32::NEG_INFINITY;
-            for (idx, score) in logits.iter().skip(start).enumerate() {
-                if *score > best_score {
-                    best_score = *score;
-                    best_id = idx as i64;
+            for (idx, &score) in logits.iter().skip(start).enumerate() {
+                if score > best_score {
+                    best_score = score;
+                    best = idx as i64;
                 }
             }
-            best_id
-        };
-        update_cache(&outputs, cache)?;
+            best
+        }; // borrow on `outputs` released here
+
+        // Phase 2: update KV cache from outputs (consumes outputs — no extra allocation).
+        //
+        // Self-attn: store new DynValue in Option slot (moved, not copied).
+        // Encoder cross-attn: extract to Vec<f32> once (only on step 0, use_cache=false).
+        for (k, val) in outputs {
+            let k_str: &str = k.as_ref();
+            let Some(indexed) = k_str.strip_prefix("present.") else {
+                continue;
+            };
+            let input_name = format!("past_key_values.{indexed}");
+            let is_encoder = input_name.contains(".encoder.");
+
+            // On step 1+ the encoder cross-attn outputs are empty — skip.
+            if use_cache && is_encoder {
+                continue;
+            }
+
+            if is_encoder {
+                // Extract to Vec<f32> — this only happens once (step 0).
+                let array = val
+                    .try_extract_array::<f32>()
+                    .map_err(|err| format!("Could not read encoder cache {k_str}: {err}"))?;
+                if array.is_empty() {
+                    continue;
+                }
+                kv.encoder.insert(
+                    input_name,
+                    CacheTensor {
+                        shape: array.shape().to_vec(),
+                        data: array.iter().copied().collect(),
+                    },
+                );
+            } else {
+                // Self-attn: move the DynValue directly into our cache.
+                // No data extraction needed — ORT tensor reused without copying.
+                kv.self_attn.insert(input_name, Some(val));
+            }
+        }
+
         Ok(best_id)
     }
 
@@ -347,6 +464,71 @@ impl LoadedOnnxModel {
             .map_err(|err| format!("Could not decode translated tokens: {err}"))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tensor helpers
+// ---------------------------------------------------------------------------
+
+/// i64 1-D slice → [1, N] tensor (batch dimension prepended).
+fn mk_i64_tensor_1d_as_2d(data: &[i64]) -> Result<DynValue, String> {
+    Tensor::from_array(([1_usize, data.len()], data.to_vec()))
+        .map(|t| t.upcast().into())
+        .map_err(|e| format!("Could not build i64 tensor: {e}"))
+}
+
+/// f32 flat slice → [1, seq, hidden] tensor.
+fn mk_f32_tensor_3d(seq: usize, hidden: usize, data: &[f32]) -> Result<DynValue, String> {
+    Tensor::from_array(([1_usize, seq, hidden], data.to_vec()))
+        .map(|t| t.upcast().into())
+        .map_err(|e| format!("Could not build f32 [1,seq,hidden] tensor: {e}"))
+}
+
+/// f32 flat slice → dynamic-shape tensor (for encoder cross-attn KV re-upload).
+fn mk_f32_tensor_dyn(shape: &[usize], data: &[f32]) -> Result<DynValue, String> {
+    Tensor::from_array((shape.to_vec(), data.to_vec()))
+        .map(|t| t.upcast().into())
+        .map_err(|e| format!("Could not build f32 tensor: {e}"))
+}
+
+fn initial_cache_tensor(dims: &[usize], ty: TensorElementType) -> Result<DynValue, String> {
+    let count = element_count(dims);
+    match ty {
+        TensorElementType::Float32 => Tensor::from_array((dims.to_vec(), vec![0_f32; count]))
+            .map(|t| t.upcast().into())
+            .map_err(|e| format!("Could not build zero f32 cache tensor: {e}")),
+        TensorElementType::Float16 => Err(
+            "Unsupported float16 cache tensor — use a float32 or int8 quantised model".into(),
+        ),
+        TensorElementType::Int64 => Tensor::from_array((dims.to_vec(), vec![0_i64; count]))
+            .map(|t| t.upcast().into())
+            .map_err(|e| format!("Could not build zero i64 cache tensor: {e}")),
+        TensorElementType::Bool => {
+            Tensor::from_array((dims.to_vec(), vec![false; count.max(1)]))
+                .map(|t| t.upcast().into())
+                .map_err(|e| format!("Could not build zero bool cache tensor: {e}"))
+        }
+        other => Err(format!("Unsupported decoder cache tensor type {other:?}")),
+    }
+}
+
+fn concrete_initial_cache_dims(shape: &[i64]) -> Vec<usize> {
+    shape
+        .iter()
+        .map(|dim| if *dim > 0 { *dim as usize } else { 1 })
+        .collect()
+}
+
+fn element_count(dims: &[usize]) -> usize {
+    if dims.is_empty() {
+        1
+    } else {
+        dims.iter().product()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session loading
+// ---------------------------------------------------------------------------
 
 fn required_file(model_dir: &Path, candidates: &[&str]) -> Result<PathBuf, String> {
     candidates
@@ -369,140 +551,53 @@ fn token_id(tokenizer: &Tokenizer, token: &str) -> Result<i64, String> {
         .ok_or_else(|| format!("Tokenizer does not define token '{token}'"))
 }
 
-fn infer_hidden_size(
-    inputs: &[ort::value::Outlet],
-    hidden_len: usize,
-    source_len: usize,
-) -> Result<usize, String> {
-    let outlet = inputs
-        .iter()
-        .find(|outlet| outlet.name() == "encoder_hidden_states")
-        .ok_or_else(|| "Decoder model is missing encoder_hidden_states input".to_string())?;
-    if let ValueType::Tensor { shape, .. } = outlet.dtype() {
-        if let Some(dim) = shape.as_ref().last().copied() {
-            if dim > 0 {
-                return Ok(dim as usize);
-            }
-        }
-    }
-    if source_len == 0 || hidden_len % source_len != 0 {
-        return Err("Could not infer encoder hidden size for decoder input".into());
-    }
-    Ok(hidden_len / source_len)
-}
-
-fn initial_cache_tensor_for_outlet(outlet: &ort::value::Outlet) -> Result<DynTensor, String> {
-    let ValueType::Tensor { ty, shape, .. } = outlet.dtype() else {
-        return Err(format!(
-            "Unsupported non-tensor decoder input '{}'",
-            outlet.name()
-        ));
-    };
-    let dims = concrete_initial_cache_dims(shape.as_ref());
-    let element_count = element_count(&dims);
-
-    match ty {
-        TensorElementType::Float32 => Tensor::from_array((dims, vec![0_f32; element_count]))
-            .map(|tensor| tensor.upcast())
-            .map_err(|err| format!("Could not build zero tensor for {}: {err}", outlet.name())),
-        TensorElementType::Float16 => Err(format!(
-            "Unsupported float16 cache input '{}' for ONNX decoder",
-            outlet.name()
-        )),
-        TensorElementType::Int64 => Tensor::from_array((dims, vec![0_i64; element_count]))
-            .map(|tensor| tensor.upcast())
-            .map_err(|err| format!("Could not build zero tensor for {}: {err}", outlet.name())),
-        TensorElementType::Bool => Tensor::from_array((dims, vec![false; element_count.max(1)]))
-            .map(|tensor| tensor.upcast())
-            .map_err(|err| format!("Could not build zero tensor for {}: {err}", outlet.name())),
-        other => Err(format!(
-            "Unsupported decoder cache tensor type {:?} for '{}'",
-            other,
-            outlet.name()
-        )),
-    }
-}
-
-fn cache_tensor_value(cache: &CacheTensor) -> Result<DynTensor, String> {
-    Tensor::from_array((cache.shape.clone(), cache.data.clone()))
-        .map(|tensor| tensor.upcast())
-        .map_err(|err| format!("Could not build decoder cache tensor: {err}"))
-}
-
-fn update_cache(
-    outputs: &ort::session::SessionOutputs,
-    cache: &mut Option<HashMap<String, CacheTensor>>,
-) -> Result<(), String> {
-    let previous = cache.take().unwrap_or_default();
-    let mut next = HashMap::new();
-    for (output_name, value) in outputs.iter() {
-        let Some(indexed_name) = output_name.strip_prefix("present.") else {
-            continue;
-        };
-        let input_name = format!("past_key_values.{indexed_name}");
-        let array = value
-            .try_extract_array::<f32>()
-            .map_err(|err| format!("Could not read decoder cache output {output_name}: {err}"))?;
-        let shape = array.shape().to_vec();
-        let data = array.iter().copied().collect::<Vec<_>>();
-        if data.is_empty() && input_name.contains(".encoder.") {
-            if let Some(previous) = previous.get(&input_name) {
-                next.insert(
-                    input_name,
-                    CacheTensor {
-                        shape: previous.shape.clone(),
-                        data: previous.data.clone(),
-                    },
-                );
-            }
-            continue;
-        }
-        next.insert(input_name, CacheTensor { shape, data });
-    }
-    *cache = Some(next);
-    Ok(())
-}
-
-fn concrete_initial_cache_dims(shape: &[i64]) -> Vec<usize> {
-    shape
-        .iter()
-        .map(|dim| if *dim > 0 { *dim as usize } else { 1 })
-        .collect()
-}
-
-fn element_count(dims: &[usize]) -> usize {
-    if dims.is_empty() {
-        1
-    } else {
-        dims.iter().product()
-    }
-}
-
 fn intra_op_threads() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get().min(8))
-        .unwrap_or(4)
+    let logical = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    (logical / 2).max(2).min(8)
 }
 
-fn load_session(path: &Path, threads: usize) -> Result<Session, String> {
-    if let Ok(session) = load_session_cuda(path, threads) {
-        return Ok(session);
+fn load_session(path: &Path, intra: usize) -> Result<(Session, String), String> {
+    if let Ok(session) = load_session_cuda(path, intra) {
+        return Ok((session, "cuda".into()));
     }
-    load_session_cpu(path, threads).map_err(|err| err.to_string())
+    if let Ok(session) = load_session_rocm(path, intra) {
+        return Ok((session, "rocm".into()));
+    }
+    let session = load_session_cpu(path, intra).map_err(|err| err.to_string())?;
+    Ok((session, "cpu".into()))
 }
 
-fn load_session_cuda(path: &Path, threads: usize) -> Result<Session, ort::Error> {
+fn load_session_cuda(path: &Path, intra: usize) -> Result<Session, ort::Error> {
     Session::builder()?
         .with_execution_providers([CUDAExecutionProvider::default().build()])?
         .with_optimization_level(GraphOptimizationLevel::All)?
-        .with_intra_threads(threads)?
+        .with_intra_threads(intra)?
+        .with_inter_threads(1)?
+        .with_parallel_execution(false)?
+        .with_memory_pattern(false)?
         .commit_from_file(path)
 }
 
-fn load_session_cpu(path: &Path, threads: usize) -> Result<Session, ort::Error> {
+fn load_session_rocm(path: &Path, intra: usize) -> Result<Session, ort::Error> {
+    Session::builder()?
+        .with_execution_providers([ROCmExecutionProvider::default().build()])?
+        .with_optimization_level(GraphOptimizationLevel::All)?
+        .with_intra_threads(intra)?
+        .with_inter_threads(1)?
+        .with_parallel_execution(false)?
+        .with_memory_pattern(false)?
+        .commit_from_file(path)
+}
+
+fn load_session_cpu(path: &Path, intra: usize) -> Result<Session, ort::Error> {
     Session::builder()?
         .with_optimization_level(GraphOptimizationLevel::All)?
-        .with_intra_threads(threads)?
+        .with_intra_threads(intra)?
+        .with_inter_threads(1)?
+        .with_parallel_execution(false)?
+        .with_memory_pattern(false)?
         .commit_from_file(path)
 }
 
