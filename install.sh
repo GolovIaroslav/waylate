@@ -5,7 +5,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local}"
 
 install -Dm755 "$ROOT/bin/waylate" "$PREFIX/bin/waylate"
-install -Dm755 "$ROOT/bin/waylate-ct2-translate" "$PREFIX/bin/waylate-ct2-translate"
 install -Dm644 "$ROOT/share/applications/dev.jar.waylate.desktop" \
   "$PREFIX/share/applications/dev.jar.waylate.desktop"
 install -Dm644 "$ROOT/share/icons/hicolor/128x128/apps/dev.jar.waylate.png" \

@@ -16,7 +16,6 @@ mkdir -p \
   "$STAGE/share/doc/waylate"
 
 install -Dm755 "$ROOT/src-tauri/target/release/waylate" "$STAGE/bin/waylate"
-install -Dm755 "$ROOT/scripts/waylate-ct2-translate" "$STAGE/bin/waylate-ct2-translate"
 install -Dm755 "$ROOT/install.sh" "$STAGE/install.sh"
 install -Dm644 "$ROOT/packaging/dev.jar.waylate.desktop" "$STAGE/share/applications/dev.jar.waylate.desktop"
 install -Dm644 "$ROOT/src-tauri/icons/128x128.png" "$STAGE/share/icons/hicolor/128x128/apps/dev.jar.waylate.png"
