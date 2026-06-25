@@ -17,7 +17,7 @@ jobs:
           pacman -S --noconfirm base-devel git nodejs npm rust webkit2gtk-4.1 gtk3 libayatana-appindicator wl-clipboard python
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install frontend dependencies
         run: npm ci
