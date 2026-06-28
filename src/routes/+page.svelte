@@ -8,6 +8,7 @@
     Clipboard,
     Copy,
     CircleHelp,
+    Cpu,
     Download,
     FolderOpen,
     History,
@@ -16,6 +17,7 @@
     Repeat2,
     Settings,
     Trash2,
+    Zap,
     ZoomIn,
     ZoomOut,
   } from "@lucide/svelte";
@@ -157,8 +159,11 @@
       }[];
       selectedModelLoaded: boolean;
       selectedDevice?: string;
+      onnxDevice?: string;
       llamaBinaryFound: boolean;
       llamaCudaReported: boolean;
+      gpuVendor?: string;
+      gpuName?: string;
     };
     hasDeeplKey: boolean;
     hasGoogleKey: boolean;
@@ -229,6 +234,7 @@
   let runtimeLogName = "llama-server.log";
   let runtimeLogText = "";
   let runtimeLogLoading = false;
+  let showAccelInfo = false;
 
   type SecretProvider = "deepl" | "google" | "yandex" | "openai-compatible";
 
@@ -242,6 +248,11 @@
     changeModel(selectableModels[0].id);
   }
   $: uiLang = config?.uiLanguage === "ru" || config?.uiLanguage === "sk" ? config.uiLanguage : "en";
+  // Decide which acceleration banner to show on the translate view:
+  //   "gpu"        — local translation is actually running on a GPU (success pill)
+  //   "cpu-upsell" — running on CPU but a usable GPU (NVIDIA/AMD) exists → offer to speed up
+  //   null         — nothing actionable (no model loaded yet, or no usable GPU)
+  $: accelMode = computeAccelMode(snapshot);
   $: if (config) applyTheme(config.theme);
   $: if (config && snapshot) scheduleConfigSave();
 
@@ -588,6 +599,16 @@
       recentLog: "Recent runtime log",
       noRuntimeLog: "No log output yet.",
       modelRamWarning: "This model may be too heavy for this PC.",
+      accelOnGpu: "Translating on your graphics card — nice and fast.",
+      accelOnCpuTitle: "Translating on your processor",
+      accelOnCpuBody: "It works fine, just a little slower.",
+      accelOnCpuBodyGpu: "You have a {gpu} — translation can run faster on it.",
+      accelLearnMore: "Tell me more",
+      accelClose: "Got it",
+      accelInfoTitle: "Making translation faster",
+      accelInfoBody: "Right now translation always uses your processor. That is reliable and works on every computer — it is just a bit slower.",
+      accelInfoBodyGpu: "Your computer has a graphics card ({gpu}). Graphics cards can translate much faster.",
+      accelInfoSoon: "A one-click \"Speed it up\" button is on the way in a future update. It will download and switch everything on for you automatically. For now you do not need to do anything — translation keeps working.",
     },
     ru: {
       translate: "Перевести",
@@ -706,6 +727,16 @@
       recentLog: "Последний лог runtime",
       noRuntimeLog: "Логов пока нет.",
       modelRamWarning: "Эта модель может быть слишком тяжёлой для этого ПК.",
+      accelOnGpu: "Перевод работает на видеокарте — это быстро.",
+      accelOnCpuTitle: "Перевод работает на процессоре",
+      accelOnCpuBody: "Всё работает, просто чуть медленнее.",
+      accelOnCpuBodyGpu: "У тебя есть {gpu} — на ней перевод может стать быстрее.",
+      accelLearnMore: "Подробнее",
+      accelClose: "Понятно",
+      accelInfoTitle: "Как ускорить перевод",
+      accelInfoBody: "Сейчас перевод всегда работает на процессоре. Это надёжно и работает на любом компьютере — просто чуть медленнее.",
+      accelInfoBodyGpu: "У твоего компьютера есть видеокарта ({gpu}). Видеокарты умеют переводить намного быстрее.",
+      accelInfoSoon: "Кнопка «Ускорить» в одно нажатие скоро появится в обновлении. Она сама всё скачает и включит. Пока делать ничего не нужно — перевод и так работает.",
     },
     sk: {
       translate: "Preložiť",
@@ -824,6 +855,16 @@
       recentLog: "Posledný runtime log",
       noRuntimeLog: "Zatiaľ nie sú žiadne logy.",
       modelRamWarning: "Tento model môže byť pre tento počítač príliš ťažký.",
+      accelOnGpu: "Preklad beží na grafickej karte — pekne rýchlo.",
+      accelOnCpuTitle: "Preklad beží na procesore",
+      accelOnCpuBody: "Funguje to dobre, len o čosi pomalšie.",
+      accelOnCpuBodyGpu: "Máš {gpu} — preklad na nej môže byť rýchlejší.",
+      accelLearnMore: "Viac info",
+      accelClose: "Rozumiem",
+      accelInfoTitle: "Ako zrýchliť preklad",
+      accelInfoBody: "Preklad teraz vždy používa procesor. Je to spoľahlivé a funguje na každom počítači — len o čosi pomalšie.",
+      accelInfoBodyGpu: "Tvoj počítač má grafickú kartu ({gpu}). Grafické karty vedia prekladať oveľa rýchlejšie.",
+      accelInfoSoon: "Tlačidlo „Zrýchliť“ na jedno kliknutie čoskoro pribudne v aktualizácii. Všetko stiahne a zapne za teba. Zatiaľ nemusíš robiť nič — preklad funguje ďalej.",
     },
   } as const;
 
@@ -1111,6 +1152,8 @@
       if (downloadState?.modelId === modelId) {
         downloadState = null;
       }
+      // Optimistic update so the card switches to Download immediately
+      modelStatuses = { ...modelStatuses, [modelId]: "notInstalled" };
       await refresh();
       status = t("settingsSaved");
     } catch (err) {
@@ -1424,6 +1467,26 @@
     return uiTexts[uiLang][key];
   }
 
+  function computeAccelMode(current = snapshot): "gpu" | "cpu-upsell" | null {
+    if (!current) return null;
+    // Prefer the local translator's device; fall back to any active GGUF runtime.
+    const device = current.runtime.onnxDevice ?? current.runtime.selectedDevice;
+    if (device && device !== "cpu") return "gpu";
+    const vendor = current.runtime.gpuVendor;
+    const acceleratable = vendor === "nvidia" || vendor === "amd";
+    if (device === "cpu" && acceleratable) return "cpu-upsell";
+    return null;
+  }
+
+  function accelGpuName(): string {
+    return snapshot?.runtime.gpuName ?? snapshot?.runtime.gpuVendor?.toUpperCase() ?? "GPU";
+  }
+
+  // Like t(), but substitutes the detected GPU name into a "{gpu}" placeholder.
+  function accelText(key: keyof typeof uiTexts.en): string {
+    return t(key).replace("{gpu}", accelGpuName());
+  }
+
   function applyTheme(theme: string) {
     if (typeof document === "undefined") return;
     document.documentElement.dataset.theme = theme === "dark" ? "dark" : "light";
@@ -1568,6 +1631,8 @@
   <title>Waylate</title>
 </svelte:head>
 
+<svelte:window on:keydown={(event) => { if (event.key === "Escape" && showAccelInfo) showAccelInfo = false; }} />
+
 <main class="shell">
   <aside class="rail">
     <button class="mark" title={t("translate")} aria-label={t("translate")} on:click={() => (tab = "translate")}>W</button>
@@ -1699,6 +1764,21 @@
             {#if status || error}
               <p class:error-note={Boolean(error)} class="inline-note">{error || status}</p>
             {/if}
+            {#if accelMode === "gpu"}
+              <aside class="accel-banner fast">
+                <Zap size={15} />
+                <span class="accel-message">{t("accelOnGpu")}</span>
+              </aside>
+            {:else if accelMode === "cpu-upsell"}
+              <aside class="accel-banner">
+                <Cpu size={15} />
+                <div class="accel-message">
+                  <strong>{t("accelOnCpuTitle")}</strong>
+                  <span>{accelText("accelOnCpuBodyGpu")}</span>
+                </div>
+                <button type="button" class="accel-cta" on:click={() => (showAccelInfo = true)}>{t("accelLearnMore")}</button>
+              </aside>
+            {/if}
           </section>
         </section>
       {:else if tab === "settings"}
@@ -1799,6 +1879,29 @@
             {/if}
             <details class="diagnostics-card">
               <summary>{t("diagnostics")}</summary>
+              <dl class="device-info">
+                {#if snapshot.runtime.onnxDevice}
+                  <div>
+                    <dt>{uiLang === "ru" ? "ONNX устройство" : uiLang === "sk" ? "ONNX zariadenie" : "ONNX device"}</dt>
+                    <dd class:device-gpu={snapshot.runtime.onnxDevice !== "cpu"}>{snapshot.runtime.onnxDevice.toUpperCase()}</dd>
+                  </div>
+                {/if}
+                {#if snapshot.runtime.selectedDevice}
+                  <div>
+                    <dt>{uiLang === "ru" ? "GGUF устройство" : uiLang === "sk" ? "GGUF zariadenie" : "GGUF device"}</dt>
+                    <dd class:device-gpu={snapshot.runtime.selectedDevice !== "cpu"}>{snapshot.runtime.selectedDevice.toUpperCase()}</dd>
+                  </div>
+                {/if}
+                {#if !snapshot.runtime.onnxDevice && !snapshot.runtime.selectedDevice}
+                  <div><dt>{uiLang === "ru" ? "Устройство" : "Device"}</dt><dd>{uiLang === "ru" ? "Модель ещё не загружена" : uiLang === "sk" ? "Model ešte nie je načítaný" : "Model not loaded yet"}</dd></div>
+                {/if}
+                {#if snapshot.runtime.gpuName}
+                  <div>
+                    <dt>{uiLang === "ru" ? "Видеокарта" : uiLang === "sk" ? "Grafická karta" : "Graphics card"}</dt>
+                    <dd>{snapshot.runtime.gpuName}</dd>
+                  </div>
+                {/if}
+              </dl>
               <div class="settings-actions">
                 <button on:click={() => loadRuntimeLog("llama-server.log")} disabled={runtimeLogLoading}>llama-server.log</button>
               </div>
@@ -1965,6 +2068,27 @@
     {/if}
   </section>
 </main>
+
+{#if showAccelInfo}
+  <div
+    class="accel-modal-backdrop"
+    role="presentation"
+    on:click={(event) => { if (event.target === event.currentTarget) showAccelInfo = false; }}
+  >
+    <div class="accel-modal" role="dialog" tabindex="-1" aria-modal="true" aria-label={t("accelInfoTitle")}>
+      <div class="accel-modal-head">
+        <Zap size={18} />
+        <h2>{t("accelInfoTitle")}</h2>
+      </div>
+      <p>{t("accelInfoBody")}</p>
+      {#if snapshot?.runtime.gpuVendor === "nvidia" || snapshot?.runtime.gpuVendor === "amd"}
+        <p>{accelText("accelInfoBodyGpu")}</p>
+      {/if}
+      <p class="accel-soon">{t("accelInfoSoon")}</p>
+      <button type="button" class="primary" on:click={() => (showAccelInfo = false)}>{t("accelClose")}</button>
+    </div>
+  </div>
+{/if}
 
 <style>
   :global(*) {
@@ -2412,6 +2536,111 @@
     gap: 8px;
   }
 
+  .accel-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    border: 1px solid var(--warn-border);
+    background: var(--warn-bg);
+    color: var(--warn-text);
+  }
+
+  .accel-banner.fast {
+    border-color: var(--ok-border);
+    background: var(--ok-bg);
+    color: var(--ok-text);
+  }
+
+  .accel-banner :global(svg) {
+    flex-shrink: 0;
+  }
+
+  .accel-message {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .accel-message strong {
+    font-weight: 600;
+  }
+
+  .accel-cta {
+    margin-left: auto;
+    flex-shrink: 0;
+    padding: 5px 12px;
+    font-size: 12px;
+    border-radius: 7px;
+    border: 1px solid var(--warn-border);
+    background: var(--surface);
+    color: var(--warn-text);
+    cursor: pointer;
+  }
+
+  .accel-cta:hover {
+    background: var(--button-hover);
+  }
+
+  .accel-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(0, 0, 0, 0.45);
+  }
+
+  .accel-modal {
+    width: min(440px, 100%);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 20px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: 0 18px 48px var(--shadow);
+  }
+
+  .accel-modal-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--primary);
+  }
+
+  .accel-modal-head h2 {
+    margin: 0;
+    font-size: 16px;
+    color: var(--text);
+  }
+
+  .accel-modal p {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--muted-text);
+  }
+
+  .accel-modal .accel-soon {
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--surface-soft);
+    color: var(--text);
+  }
+
+  .accel-modal .primary {
+    align-self: flex-end;
+    margin-top: 4px;
+  }
+
   .range-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
@@ -2764,6 +2993,38 @@
     to {
       transform: rotate(360deg);
     }
+  }
+
+  .device-info {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .device-info div {
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    min-width: 120px;
+  }
+
+  .device-info dt {
+    color: var(--muted-text);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .device-info dd {
+    margin: 2px 0 0;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .device-gpu {
+    color: var(--primary) !important;
   }
 
   @media (max-width: 760px) {

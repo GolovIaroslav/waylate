@@ -97,6 +97,7 @@ struct KvInputMeta {
 struct LoadedOnnxModel {
     tokenizer: Tokenizer,
     encoder: Session,
+    /// Merged decoder (handles both step 0 and step 1+ via use_cache_branch).
     decoder: Session,
     eos_token_id: i64,
     device: String,
@@ -328,11 +329,11 @@ impl LoadedOnnxModel {
             "encoder_attention_mask".into(),
             mk_i64_tensor_1d_as_2d(encoder_attention_mask)?,
         );
+        // Merged decoder needs encoder_hidden_states and use_cache_branch.
         inputs.insert(
             "encoder_hidden_states".into(),
             mk_f32_tensor_3d(encoder_seq_len, self.hidden_size, encoder_hidden_states)?,
         );
-
         if self.has_use_cache_branch {
             inputs.insert(
                 "use_cache_branch".into(),
@@ -413,6 +414,8 @@ impl LoadedOnnxModel {
         //
         // Self-attn: store new DynValue in Option slot (moved, not copied).
         // Encoder cross-attn: extract to Vec<f32> once (only on step 0, use_cache=false).
+        //   - Merged decoder step 0 (use_cache=false): outputs present.*.encoder.* → store.
+        //   - Merged decoder step 1+ (use_cache=true): outputs empty Constants → skip.
         for (k, val) in outputs {
             let k_str: &str = k.as_ref();
             let Some(indexed) = k_str.strip_prefix("present.") else {
@@ -421,13 +424,13 @@ impl LoadedOnnxModel {
             let input_name = format!("past_key_values.{indexed}");
             let is_encoder = input_name.contains(".encoder.");
 
-            // On step 1+ the encoder cross-attn outputs are empty — skip.
-            if use_cache && is_encoder {
+            // Merged decoder on step 1+ emits empty Constant tensors for encoder KV — skip.
+            if is_encoder && use_cache {
                 continue;
             }
 
             if is_encoder {
-                // Extract to Vec<f32> — this only happens once (step 0).
+                // Extract to Vec<f32> — this only happens once (step 0, merged decoder).
                 let array = val
                     .try_extract_array::<f32>()
                     .map_err(|err| format!("Could not read encoder cache {k_str}: {err}"))?;
@@ -552,18 +555,34 @@ fn token_id(tokenizer: &Tokenizer, token: &str) -> Result<i64, String> {
 }
 
 fn intra_op_threads() -> usize {
+    // Optional override for unusual hardware / support cases. Benchmarking is the only
+    // reliable way to tune this, so we leave an escape hatch but never advertise it.
+    if let Ok(v) = std::env::var("WAYLATE_ONNX_INTRA") {
+        if let Ok(n) = v.parse::<usize>() {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+    // Benchmarked on a Ryzen 5800H (8 cores / 16 threads): ~4 intra-op threads is as
+    // fast as saturating all 16, while the previous default of logical/2 (=8) was
+    // measurably the *slowest* point. NLLB INT8 decode is memory-bound here, so piling
+    // on threads only adds contention. Use ~a quarter of logical cores, which both hits
+    // the fast zone and leaves the rest of the machine responsive for a background app.
     let logical = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    (logical / 2).max(2).min(8)
+    (logical / 4).clamp(2, 8)
 }
 
 fn load_session(path: &Path, intra: usize) -> Result<(Session, String), String> {
-    if let Ok(session) = load_session_cuda(path, intra) {
-        return Ok((session, "cuda".into()));
+    match load_session_cuda(path, intra) {
+        Ok(session) => return Ok((session, "cuda".into())),
+        Err(err) => eprintln!("[onnx] CUDA EP unavailable, falling back: {err}"),
     }
-    if let Ok(session) = load_session_rocm(path, intra) {
-        return Ok((session, "rocm".into()));
+    match load_session_rocm(path, intra) {
+        Ok(session) => return Ok((session, "rocm".into())),
+        Err(err) => eprintln!("[onnx] ROCm EP unavailable, falling back: {err}"),
     }
     let session = load_session_cpu(path, intra).map_err(|err| err.to_string())?;
     Ok((session, "cpu".into()))
@@ -571,7 +590,7 @@ fn load_session(path: &Path, intra: usize) -> Result<(Session, String), String> 
 
 fn load_session_cuda(path: &Path, intra: usize) -> Result<Session, ort::Error> {
     Session::builder()?
-        .with_execution_providers([CUDAExecutionProvider::default().build()])?
+        .with_execution_providers([CUDAExecutionProvider::default().build().error_on_failure()])?
         .with_optimization_level(GraphOptimizationLevel::All)?
         .with_intra_threads(intra)?
         .with_inter_threads(1)?
@@ -619,23 +638,25 @@ mod tests {
         let model_dir = paths.models_dir.join(&entry.id);
         let mut model = LoadedOnnxModel::load(&entry, &model_dir).expect("model should load");
 
-        eprintln!("encoder inputs:");
-        for input in model.encoder.inputs() {
-            eprintln!("  {} {:?}", input.name(), input.dtype());
-        }
-        eprintln!("decoder inputs:");
-        for input in model.decoder.inputs() {
-            eprintln!("  {} {:?}", input.name(), input.dtype());
-        }
-        eprintln!("decoder outputs:");
-        for output in model.decoder.outputs() {
-            eprintln!("  {} {:?}", output.name(), output.dtype());
-        }
-
+        // A fixed, sentence-length input gives a deterministic token count so timing
+        // across thread/mem-pattern settings is comparable run to run.
+        let source = "The weather is nice today and we are going to the park to play.";
+        let mut token_count = 0_usize;
+        let t0 = std::time::Instant::now();
         let translated = model
-            .translate("Hello world", "eng_Latn", "rus_Cyrl", &mut |_| Ok(()))
+            .translate(source, "eng_Latn", "rus_Cyrl", &mut |partial| {
+                token_count = partial.split_whitespace().count();
+                Ok(())
+            })
             .expect("translation should succeed");
+        let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
         assert!(!translated.trim().is_empty());
-        eprintln!("translation: {translated}");
+        eprintln!(
+            "[bench] intra={} total={:.0}ms words~{} translation={}",
+            intra_op_threads(),
+            total_ms,
+            token_count,
+            translated
+        );
     }
 }

@@ -56,7 +56,7 @@ pub fn translate_with_progress(
                 warning: None,
             }),
             EngineKind::ManagedLlamaCpp => {
-                translate_spec_managed_llama(paths, runtime_manager, config, request, &entry)
+                translate_spec_managed_llama(paths, runtime_manager, config, request, &entry, on_progress)
             }
             EngineKind::OpenAiCompatible => translate_openai_compatible(config, request),
             EngineKind::NetworkApi => {
@@ -74,7 +74,7 @@ pub fn translate_with_progress(
     match profile.provider {
         ProviderKind::OpenAiCompatible => translate_openai_compatible(config, request),
         ProviderKind::Custom => {
-            translate_custom_local(paths, runtime_manager, config, request, &profile)
+            translate_custom_local(paths, runtime_manager, config, request, &profile, on_progress)
         }
         ProviderKind::DeepL => translate_deepl(config, request),
         ProviderKind::Google => translate_google(config, request),
@@ -88,6 +88,7 @@ fn translate_spec_managed_llama(
     config: &AppConfig,
     request: &TranslationRequest,
     entry: &ModelCatalogEntry,
+    on_progress: &mut dyn FnMut(&str) -> Result<(), String>,
 ) -> Result<TranslationResponse, String> {
     let model_path = resolve_spec_gguf_path(paths, entry)
         .ok_or_else(|| "This model is not installed — Download it in Settings.".to_string())?;
@@ -114,9 +115,9 @@ fn translate_spec_managed_llama(
                         "text": request.text,
                     }]
                 }],
-                "temperature": 0.1,
-                "stream": false
+                "temperature": 0.1
             }),
+            on_progress,
         )?
     } else {
         let template = entry
@@ -153,6 +154,7 @@ fn translate_spec_managed_llama(
             context_size,
             &entry.prompt_style,
             &prompt,
+            on_progress,
         )?
     };
 
@@ -246,10 +248,11 @@ fn translate_custom_local(
     config: &AppConfig,
     request: &TranslationRequest,
     profile: &crate::models::ModelProfile,
+    on_progress: &mut dyn FnMut(&str) -> Result<(), String>,
 ) -> Result<TranslationResponse, String> {
     if profile.id != "custom-local" {
         let (translated, device) =
-            translate_catalog_managed_gguf(paths, runtime_manager, config, request, profile)?;
+            translate_catalog_managed_gguf(paths, runtime_manager, config, request, profile, on_progress)?;
         return Ok(TranslationResponse {
             translated_text: translated,
             provider_label: format!("Managed local GGUF ({device})"),
@@ -266,6 +269,7 @@ fn translate_custom_local(
             &request.source_lang,
             &request.target_lang,
             &request.text,
+            on_progress,
         )?;
         return Ok(TranslationResponse {
             translated_text: translated,
@@ -283,6 +287,7 @@ fn translate_catalog_managed_gguf(
     config: &AppConfig,
     request: &TranslationRequest,
     profile: &crate::models::ModelProfile,
+    on_progress: &mut dyn FnMut(&str) -> Result<(), String>,
 ) -> Result<(String, String), String> {
     let model_path = runtime::resolve_catalog_gguf_path(paths, profile)
         .ok_or_else(|| "This model is not installed - Download it in Settings.".to_string())?;
@@ -306,6 +311,7 @@ fn translate_catalog_managed_gguf(
         &request.source_lang,
         &request.target_lang,
         &request.text,
+        on_progress,
     )
 }
 

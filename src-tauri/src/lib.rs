@@ -1584,6 +1584,16 @@ fn spawn_runtime_housekeeper(paths: AppPaths, runtime: Arc<RuntimeManager>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ORT prebuilt binaries use OpenMP, which ignores SessionBuilder::with_intra_threads.
+    // Setting OMP_NUM_THREADS here ensures the actual kernel thread count matches physical cores.
+    let ort_threads = (std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        / 2)
+    .max(2)
+    .min(8);
+    unsafe { std::env::set_var("OMP_NUM_THREADS", ort_threads.to_string()) };
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             handle_args(app, &args);

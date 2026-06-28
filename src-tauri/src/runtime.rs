@@ -12,7 +12,7 @@ use std::{
     os::unix::fs::{symlink, PermissionsExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -23,8 +23,14 @@ pub struct RuntimeReport {
     pub active_profiles: Vec<RuntimeEntry>,
     pub selected_model_loaded: bool,
     pub selected_device: Option<String>,
+    pub onnx_device: Option<String>,
     pub llama_binary_found: bool,
     pub llama_cuda_reported: bool,
+    /// Physical GPU vendor detected on the machine: "nvidia" | "amd" | "intel" | None.
+    /// Used by the UI to decide whether to offer GPU acceleration.
+    pub gpu_vendor: Option<String>,
+    /// Human-friendly GPU name for display, e.g. "NVIDIA GeForce RTX 3060 Laptop GPU".
+    pub gpu_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,12 +116,18 @@ impl RuntimeManager {
             }
         }
 
+        let onnx_device = crate::engines::onnx_mt::active_device(&config.model_id);
+        let (gpu_vendor, gpu_name) = detect_gpu().clone();
+
         RuntimeReport {
             active_profiles,
             selected_model_loaded,
             selected_device,
+            onnx_device,
             llama_binary_found: llama_binary.is_some(),
             llama_cuda_reported,
+            gpu_vendor,
+            gpu_name,
         }
     }
 
@@ -422,6 +434,57 @@ fn collect_dead_profiles(processes: &mut HashMap<String, ManagedProcess>) -> Vec
     dead
 }
 
+/// Detect the machine's GPU once and cache it — physical hardware does not change
+/// while the app runs. Returns `(vendor, friendly_name)`.
+///
+/// `vendor` is one of "nvidia" | "amd" | "intel"; `None` means no discrete/known GPU
+/// was found (or detection tools are missing). Only "nvidia" and "amd" are candidates
+/// for translation acceleration; "intel" is reported for completeness but not offered.
+fn detect_gpu() -> &'static (Option<String>, Option<String>) {
+    static GPU_INFO: OnceLock<(Option<String>, Option<String>)> = OnceLock::new();
+    GPU_INFO.get_or_init(|| {
+        // Preferred: nvidia-smi gives an exact model name and confirms a usable driver.
+        if let Ok(output) = Command::new("nvidia-smi")
+            .args(["--query-gpu=name", "--format=csv,noheader"])
+            .output()
+        {
+            if output.status.success() {
+                let name = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .map(|line| line.trim().to_string())
+                    .filter(|line| !line.is_empty());
+                if let Some(name) = name {
+                    return (Some("nvidia".to_string()), Some(name));
+                }
+            }
+        }
+
+        // Fallback: parse `lspci` so we still detect a card when no driver tools exist.
+        if let Ok(output) = Command::new("sh")
+            .arg("-c")
+            .arg("lspci 2>/dev/null | grep -Ei 'vga|3d controller|display'")
+            .output()
+        {
+            let text = String::from_utf8_lossy(&output.stdout).to_lowercase();
+            if text.contains("nvidia") {
+                return (Some("nvidia".to_string()), Some("NVIDIA GPU".to_string()));
+            }
+            if text.contains("amd")
+                || text.contains("radeon")
+                || text.contains("advanced micro devices")
+            {
+                return (Some("amd".to_string()), Some("AMD GPU".to_string()));
+            }
+            if text.contains("intel") {
+                return (Some("intel".to_string()), Some("Intel GPU".to_string()));
+            }
+        }
+
+        (None, None)
+    })
+}
+
 fn timeout_for_policy(config: &AppConfig) -> Option<Duration> {
     match config.local_model_policy.as_str() {
         "memory-saver" => Some(Duration::from_secs(0)),
@@ -531,60 +594,16 @@ pub fn translate_via_managed_llama(
     source: &str,
     target: &str,
     text: &str,
+    on_progress: &mut dyn FnMut(&str) -> Result<(), String>,
 ) -> Result<(String, String), String> {
     let endpoint = manager.ensure_llama_server(paths, config, profile_id)?;
     let prompt = prompt_template(config, source, target, text);
     let translated = if config.local_prompt_style == "completion" {
-        let value: Value = Client::new()
-            .post(format!("{}/completion", endpoint.endpoint))
-            .json(&json!({
-                "prompt": prompt,
-                "temperature": 0.1,
-                "n_predict": 400
-            }))
-            .send()
-            .map_err(|err| format!("Managed local model could not translate text: {err}"))?
-            .error_for_status()
-            .map_err(|err| format!("Managed local model returned an error: {err}"))?
-            .json()
-            .map_err(|err| format!("Could not parse managed local model response: {err}"))?;
-        value
-            .get("content")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                "Managed local model response did not contain completion text".to_string()
-            })?
-            .trim()
-            .to_string()
+        stream_completion(&endpoint.endpoint, &prompt, on_progress)?
     } else {
-        let value: Value = Client::new()
-            .post(format!("{}/v1/chat/completions", endpoint.endpoint))
-            .json(&json!({
-                "model": "managed-local-gguf",
-                "messages": [
-                    {"role": "system", "content": "You are a precise translation engine. Do not explain your answer."},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.1,
-                "stream": false
-            }))
-            .send()
-            .map_err(|err| format!("Managed local model could not translate text: {err}"))?
-            .error_for_status()
-            .map_err(|err| format!("Managed local model returned an error: {err}"))?
-            .json()
-            .map_err(|err| format!("Could not parse managed local model response: {err}"))?;
-        value
-            .pointer("/choices/0/message/content")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/choices/0/text").and_then(Value::as_str))
-            .ok_or_else(|| {
-                "Managed local model response did not contain a translation".to_string()
-            })?
-            .trim()
-            .to_string()
+        let system = "You are a precise translation engine. Do not explain your answer.";
+        stream_chat_completion(&endpoint.endpoint, system, &prompt, on_progress)?
     };
-
     Ok((translated, endpoint.device))
 }
 
@@ -599,6 +618,7 @@ pub fn translate_via_spec_llama(
     context_size: u32,
     prompt_style: &Option<crate::models::PromptStyle>,
     prompt: &str,
+    on_progress: &mut dyn FnMut(&str) -> Result<(), String>,
 ) -> Result<(String, String), String> {
     let endpoint = manager.ensure_llama_server_with_model(
         paths,
@@ -609,46 +629,10 @@ pub fn translate_via_spec_llama(
     )?;
     let is_completion = matches!(prompt_style, Some(crate::models::PromptStyle::Completion));
     let translated = if is_completion {
-        let value: Value = Client::new()
-            .post(format!("{}/completion", endpoint.endpoint))
-            .json(&json!({"prompt": prompt, "temperature": 0.1, "n_predict": 400}))
-            .send()
-            .map_err(|err| format!("Local model could not process translation: {err}"))?
-            .error_for_status()
-            .map_err(|err| format!("Local model returned an error: {err}"))?
-            .json()
-            .map_err(|err| format!("Could not parse local model response: {err}"))?;
-        value
-            .get("content")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "Local model response did not contain completion text".to_string())?
-            .trim()
-            .to_string()
+        stream_completion(&endpoint.endpoint, prompt, on_progress)?
     } else {
-        let value: Value = Client::new()
-            .post(format!("{}/v1/chat/completions", endpoint.endpoint))
-            .json(&json!({
-                "model": "managed-local-gguf",
-                "messages": [
-                    {"role": "system", "content": "You are a precise translation engine. Do not explain your answer."},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.1,
-                "stream": false
-            }))
-            .send()
-            .map_err(|err| format!("Local model could not process translation: {err}"))?
-            .error_for_status()
-            .map_err(|err| format!("Local model returned an error: {err}"))?
-            .json()
-            .map_err(|err| format!("Could not parse local model response: {err}"))?;
-        value
-            .pointer("/choices/0/message/content")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/choices/0/text").and_then(Value::as_str))
-            .ok_or_else(|| "Local model response did not contain a translation".to_string())?
-            .trim()
-            .to_string()
+        let system = "You are a precise translation engine. Do not explain your answer.";
+        stream_chat_completion(&endpoint.endpoint, system, prompt, on_progress)?
     };
     Ok((translated, endpoint.device))
 }
@@ -660,7 +644,8 @@ pub fn translate_via_spec_llama_chat(
     profile_id: &str,
     model_path: &str,
     context_size: u32,
-    body: Value,
+    mut body: Value,
+    on_progress: &mut dyn FnMut(&str) -> Result<(), String>,
 ) -> Result<(String, String), String> {
     let endpoint = manager.ensure_llama_server_with_model(
         paths,
@@ -669,23 +654,98 @@ pub fn translate_via_spec_llama_chat(
         model_path,
         context_size,
     )?;
-    let value: Value = Client::new()
+    body["stream"] = serde_json::json!(true);
+    let response = Client::new()
         .post(format!("{}/v1/chat/completions", endpoint.endpoint))
         .json(&body)
         .send()
         .map_err(|err| format!("Local model could not process translation: {err}"))?
         .error_for_status()
-        .map_err(|err| format!("Local model returned an error: {err}"))?
-        .json()
-        .map_err(|err| format!("Could not parse local model response: {err}"))?;
-    let translated = value
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .or_else(|| value.pointer("/choices/0/text").and_then(Value::as_str))
-        .ok_or_else(|| "Local model response did not contain a translation".to_string())?
-        .trim()
-        .to_string();
+        .map_err(|err| format!("Local model returned an error: {err}"))?;
+    let translated = parse_sse_chat_stream(response, on_progress)?;
     Ok((translated, endpoint.device))
+}
+
+fn stream_completion(
+    base_endpoint: &str,
+    prompt: &str,
+    on_progress: &mut dyn FnMut(&str) -> Result<(), String>,
+) -> Result<String, String> {
+    let response = Client::new()
+        .post(format!("{base_endpoint}/completion"))
+        .json(&json!({
+            "prompt": prompt,
+            "temperature": 0.1,
+            "n_predict": 512,
+            "stream": true
+        }))
+        .send()
+        .map_err(|err| format!("Local model could not process translation: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("Local model returned an error: {err}"))?;
+
+    use std::io::BufRead;
+    let reader = std::io::BufReader::new(response);
+    let mut full_text = String::new();
+    for line in reader.lines() {
+        let line = line.map_err(|err| format!("Error reading completion stream: {err}"))?;
+        let data = if let Some(d) = line.strip_prefix("data: ") { d } else { continue };
+        if data == "[DONE]" { break; }
+        if let Ok(val) = serde_json::from_str::<Value>(data) {
+            if let Some(tok) = val.get("content").and_then(Value::as_str) {
+                full_text.push_str(tok);
+                on_progress(full_text.trim())?;
+            }
+            if val.get("stop").and_then(Value::as_bool).unwrap_or(false) { break; }
+        }
+    }
+    Ok(full_text.trim().to_string())
+}
+
+fn stream_chat_completion(
+    base_endpoint: &str,
+    system: &str,
+    prompt: &str,
+    on_progress: &mut dyn FnMut(&str) -> Result<(), String>,
+) -> Result<String, String> {
+    let response = Client::new()
+        .post(format!("{base_endpoint}/v1/chat/completions"))
+        .json(&json!({
+            "model": "managed-local-gguf",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.1,
+            "stream": true
+        }))
+        .send()
+        .map_err(|err| format!("Local model could not process translation: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("Local model returned an error: {err}"))?;
+
+    parse_sse_chat_stream(response, on_progress)
+}
+
+fn parse_sse_chat_stream(
+    response: reqwest::blocking::Response,
+    on_progress: &mut dyn FnMut(&str) -> Result<(), String>,
+) -> Result<String, String> {
+    use std::io::BufRead;
+    let reader = std::io::BufReader::new(response);
+    let mut full_text = String::new();
+    for line in reader.lines() {
+        let line = line.map_err(|err| format!("Error reading chat stream: {err}"))?;
+        let data = if let Some(d) = line.strip_prefix("data: ") { d } else { continue };
+        if data == "[DONE]" { break; }
+        if let Ok(val) = serde_json::from_str::<Value>(data) {
+            if let Some(delta) = val.pointer("/choices/0/delta/content").and_then(Value::as_str) {
+                full_text.push_str(delta);
+                on_progress(full_text.trim())?;
+            }
+        }
+    }
+    Ok(full_text.trim().to_string())
 }
 
 /// Pinned llama.cpp release used for the bundled llama-server.
