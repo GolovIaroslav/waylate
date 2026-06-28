@@ -576,13 +576,19 @@ fn intra_op_threads() -> usize {
 }
 
 fn load_session(path: &Path, intra: usize) -> Result<(Session, String), String> {
-    match load_session_cuda(path, intra) {
-        Ok(session) => return Ok((session, "cuda".into())),
-        Err(err) => eprintln!("[onnx] CUDA EP unavailable, falling back: {err}"),
-    }
-    match load_session_rocm(path, intra) {
-        Ok(session) => return Ok((session, "rocm".into())),
-        Err(err) => eprintln!("[onnx] ROCm EP unavailable, falling back: {err}"),
+    // Only attempt the GPU execution provider that matches the detected hardware.
+    // Blindly trying CUDA then ROCm on every load spams the log with two guaranteed
+    // failures on the common CPU-only build; route by vendor instead.
+    match crate::runtime::detect_gpu().0.as_deref() {
+        Some("nvidia") => match load_session_cuda(path, intra) {
+            Ok(session) => return Ok((session, "cuda".into())),
+            Err(err) => eprintln!("[onnx] CUDA EP unavailable, using CPU: {err}"),
+        },
+        Some("amd") => match load_session_rocm(path, intra) {
+            Ok(session) => return Ok((session, "rocm".into())),
+            Err(err) => eprintln!("[onnx] ROCm EP unavailable, using CPU: {err}"),
+        },
+        _ => {}
     }
     let session = load_session_cpu(path, intra).map_err(|err| err.to_string())?;
     Ok((session, "cpu".into()))

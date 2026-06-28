@@ -440,7 +440,7 @@ fn collect_dead_profiles(processes: &mut HashMap<String, ManagedProcess>) -> Vec
 /// `vendor` is one of "nvidia" | "amd" | "intel"; `None` means no discrete/known GPU
 /// was found (or detection tools are missing). Only "nvidia" and "amd" are candidates
 /// for translation acceleration; "intel" is reported for completeness but not offered.
-fn detect_gpu() -> &'static (Option<String>, Option<String>) {
+pub(crate) fn detect_gpu() -> &'static (Option<String>, Option<String>) {
     static GPU_INFO: OnceLock<(Option<String>, Option<String>)> = OnceLock::new();
     GPU_INFO.get_or_init(|| {
         // Preferred: nvidia-smi gives an exact model name and confirms a usable driver.
