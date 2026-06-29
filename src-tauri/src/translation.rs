@@ -93,6 +93,47 @@ fn translate_spec_managed_llama(
     let model_path = resolve_spec_gguf_path(paths, entry)
         .ok_or_else(|| "This model is not installed — Download it in Settings.".to_string())?;
 
+    if request.source_lang == "auto" {
+        return Err(
+            "Auto-detect is not supported for local models. Please select a source language."
+                .to_string(),
+        );
+    }
+
+    // TranslateGemma's chat template expects a structured content object carrying explicit
+    // source/target language codes. A plain prompt string degrades its output, so build the
+    // structured request and post it directly.
+    if entry.id == "translategemma-4b-gguf" {
+        let body = json!({
+            "model": "managed-local-gguf",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "source_lang_code": request.source_lang.replace('_', "-"),
+                    "target_lang_code": request.target_lang.replace('_', "-"),
+                    "text": request.text,
+                }]
+            }],
+            "temperature": 0.1,
+            "stream": false
+        });
+        let (translated, device) = runtime::translate_via_spec_llama_chat(
+            runtime_manager,
+            paths,
+            config,
+            &request.model_id,
+            &model_path,
+            config.local_context_size,
+            body,
+        )?;
+        return Ok(TranslationResponse {
+            translated_text: translated,
+            provider_label: format!("Local GGUF ({})", device),
+            warning: None,
+        });
+    }
+
     let template = entry
         .prompt_template
         .as_deref()
@@ -116,7 +157,9 @@ fn translate_spec_managed_llama(
         .replace("{target}", target_name)
         .replace("{text}", &request.text);
 
-    let context_size = entry.min_ram_bytes.map(|_| 4096u32).unwrap_or(4096);
+    // Honor the user's Advanced context-size setting (defaults to 4096) instead of a
+    // hardcoded constant. The old `min_ram_bytes.map(|_| 4096)` always produced 4096.
+    let context_size = config.local_context_size;
 
     let (translated, device) = runtime::translate_via_spec_llama(
         runtime_manager,
@@ -172,6 +215,11 @@ fn translate_openai_compatible(
     } else {
         config.openai_endpoint.trim()
     };
+    // A non-local endpoint sends text off the machine, so honor the "Use online APIs"
+    // toggle. Local servers (localhost / loopback) stay allowed even when APIs are off.
+    if !endpoint_is_local(endpoint) {
+        ensure_network_enabled(config)?;
+    }
     let prompt = format!(
         "Translate the following text from {} to {}. Return only the translation.\n\n{}",
         request.source_lang, request.target_lang, request.text
@@ -263,6 +311,12 @@ fn translate_catalog_managed_gguf(
 ) -> Result<(String, String), String> {
     let model_path = runtime::resolve_catalog_gguf_path(paths, profile)
         .ok_or_else(|| "This model is not installed - Download it in Settings.".to_string())?;
+    if request.source_lang == "auto" {
+        return Err(
+            "Auto-detect is not supported for local models. Please select a source language."
+                .to_string(),
+        );
+    }
     let mut derived = config.clone();
     derived.custom_backend_mode = "managed-gguf".into();
     derived.custom_model_path = model_path;
@@ -407,6 +461,16 @@ fn translate_yandex(
         provider_label: "Yandex Cloud Translate".into(),
         warning: Some("Text was sent to Yandex because the Yandex profile is selected.".into()),
     })
+}
+
+/// True when the endpoint targets the local machine (loopback). Used to decide whether the
+/// "Use online APIs" toggle applies — local servers never leave the machine.
+fn endpoint_is_local(endpoint: &str) -> bool {
+    let lowered = endpoint.to_ascii_lowercase();
+    lowered.contains("localhost")
+        || lowered.contains("127.0.0.1")
+        || lowered.contains("[::1]")
+        || lowered.contains("0.0.0.0")
 }
 
 fn ensure_network_enabled(config: &AppConfig) -> Result<(), String> {

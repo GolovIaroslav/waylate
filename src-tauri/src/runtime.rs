@@ -670,6 +670,44 @@ pub fn translate_via_spec_llama(
     Ok((translated, endpoint.device))
 }
 
+/// Translate a spec catalog GGUF model with a caller-supplied chat-completions body.
+/// Used by models (TranslateGemma) whose chat template needs a structured content object
+/// rather than a flat prompt string. Non-streaming: the full response is returned at once.
+pub fn translate_via_spec_llama_chat(
+    manager: &RuntimeManager,
+    paths: &AppPaths,
+    config: &AppConfig,
+    profile_id: &str,
+    model_path: &str,
+    context_size: u32,
+    body: Value,
+) -> Result<(String, String), String> {
+    let endpoint = manager.ensure_llama_server_with_model(
+        paths,
+        config,
+        profile_id,
+        model_path,
+        context_size,
+    )?;
+    let value: Value = Client::new()
+        .post(format!("{}/v1/chat/completions", endpoint.endpoint))
+        .json(&body)
+        .send()
+        .map_err(|err| format!("Local model could not process translation: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("Local model returned an error: {err}"))?
+        .json()
+        .map_err(|err| format!("Could not parse local model response: {err}"))?;
+    let translated = value
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/choices/0/text").and_then(Value::as_str))
+        .ok_or_else(|| "Local model response did not contain a translation".to_string())?
+        .trim()
+        .to_string();
+    Ok((translated, endpoint.device))
+}
+
 fn stream_completion(
     base_endpoint: &str,
     prompt: &str,
@@ -755,8 +793,14 @@ fn parse_sse_chat_stream(
 /// Pinned llama.cpp release used for the bundled llama-server.
 /// Update this constant when bumping the bundled runtime version.
 const LLAMA_SERVER_RELEASE: &str = "b8987";
-const LLAMA_SERVER_ZIP_URL: &str =
-    "https://github.com/ggml-org/llama.cpp/releases/download/b8987/llama-b8987-bin-ubuntu-x64.tar.gz";
+// Built from the release tag so bumping LLAMA_SERVER_RELEASE updates the URL too — no risk
+// of silently downloading an old binary because one hardcoded tag was missed.
+fn llama_server_zip_url() -> String {
+    format!(
+        "https://github.com/ggml-org/llama.cpp/releases/download/{tag}/llama-{tag}-bin-ubuntu-x64.tar.gz",
+        tag = LLAMA_SERVER_RELEASE
+    )
+}
 
 /// Resolve a usable `llama-server` binary.
 ///
@@ -832,9 +876,10 @@ fn download_llama_server_binary(
     let runtime_dir = paths.data_dir.join("runtime");
     fs::create_dir_all(&runtime_dir).map_err(|err| err.to_string())?;
 
+    let zip_url = llama_server_zip_url();
     let archive_path = runtime_dir.join(format!(
         "llama-server-{LLAMA_SERVER_RELEASE}.{}",
-        if LLAMA_SERVER_ZIP_URL.ends_with(".tar.gz") {
+        if zip_url.ends_with(".tar.gz") {
             "tar.gz"
         } else {
             "zip"
@@ -847,7 +892,7 @@ fn download_llama_server_binary(
         .build()
         .map_err(|err| err.to_string())?;
     let mut response = client
-        .get(LLAMA_SERVER_ZIP_URL)
+        .get(&zip_url)
         .send()
         .map_err(|err| format!("Could not download llama-server: {err}"))?
         .error_for_status()
@@ -858,7 +903,7 @@ fn download_llama_server_binary(
         .map_err(|err| format!("Could not write llama archive: {err}"))?;
     drop(archive_file);
 
-    if LLAMA_SERVER_ZIP_URL.ends_with(".tar.gz") {
+    if zip_url.ends_with(".tar.gz") {
         extract_llama_runtime_tar_gz(&archive_path, dest)?;
     } else {
         extract_llama_runtime_zip(&archive_path, dest)?;
