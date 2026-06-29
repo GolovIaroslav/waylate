@@ -266,7 +266,8 @@
   $: uiLang = config?.uiLanguage === "ru" || config?.uiLanguage === "sk" ? config.uiLanguage : "en";
   // Decide which acceleration banner to show on the translate view:
   //   "gpu"        — local translation is actually running on a GPU (success pill)
-  //   "cpu-upsell" — running on CPU but a usable GPU (NVIDIA/AMD) exists → offer to speed up
+  //   "cpu-upsell" — running on CPU but NVIDIA GPU exists → offer to speed up
+  //   "cpu-amd"    — running on CPU and AMD GPU exists → honest "not available yet"
   //   null         — nothing actionable (no model loaded yet, or no usable GPU)
   $: accelMode = computeAccelMode(snapshot, config);
   $: if (config) applyTheme(config.theme);
@@ -637,6 +638,9 @@
       accelDisable: "Switch back to processor",
       accelStalledTitle: "GPU is on, but translation is still using the processor",
       accelStalledBody: "The graphics runtime could not load, so Waylate fell back to the processor.",
+      accelAmdNotAvailable: "GPU acceleration for AMD is not available yet.",
+      runningSummaryCpu: "Currently running on: processor",
+      runningSummaryGpu: "Currently running on: {gpu}",
       accelReadyRestart: "Graphics acceleration is ready. Restart Waylate to switch to the GPU.",
       accelRestartNow: "Restart now",
       keySave: "Save",
@@ -785,6 +789,9 @@
       accelDisable: "Вернуться на процессор",
       accelStalledTitle: "Видеокарта включена, но перевод всё ещё на процессоре",
       accelStalledBody: "Графический runtime не загрузился, поэтому Waylate вернулся на процессор.",
+      accelAmdNotAvailable: "Ускорение для AMD пока недоступно.",
+      runningSummaryCpu: "Сейчас работает на: процессоре",
+      runningSummaryGpu: "Сейчас работает на: {gpu}",
       accelReadyRestart: "Ускорение готово. Перезапустите Waylate, чтобы включить видеокарту.",
       accelRestartNow: "Перезапустить",
       keySave: "Сохранить",
@@ -933,6 +940,9 @@
       accelDisable: "Späť na procesor",
       accelStalledTitle: "Grafická karta je zapnutá, ale preklad stále beží na procesore",
       accelStalledBody: "Grafický runtime sa nepodarilo načítať, preto sa Waylate vrátil na procesor.",
+      accelAmdNotAvailable: "Akcelerácia pre AMD zatiaľ nie je dostupná.",
+      runningSummaryCpu: "Momentálne beží na: procesore",
+      runningSummaryGpu: "Momentálne beží na: {gpu}",
       accelReadyRestart: "Zrýchlenie je pripravené. Reštartujte Waylate na prepnutie na GPU.",
       accelRestartNow: "Reštartovať",
       keySave: "Uložiť",
@@ -1129,9 +1139,11 @@
     const nextSource = config.targetLang;
     config.targetLang = config.sourceLang;
     config.sourceLang = nextSource;
-    const oldSource = sourceText;
-    sourceText = translatedText;
-    translatedText = oldSource;
+    if (translatedText.trim()) {
+      const oldSource = sourceText;
+      sourceText = translatedText;
+      translatedText = oldSource;
+    }
   }
 
   function changeModel(modelId: string) {
@@ -1615,17 +1627,17 @@
   function computeAccelMode(
     current = snapshot,
     currentConfig = config,
-  ): "gpu" | "cpu-upsell" | "gpu-stalled" | null {
+  ): "gpu" | "cpu-upsell" | "cpu-amd" | "gpu-stalled" | null {
     if (!current) return null;
     // Prefer the local translator's device; fall back to any active GGUF runtime.
     const device = current.runtime.onnxDevice ?? current.runtime.selectedDevice;
     if (device && device !== "cpu") return "gpu";
     const vendor = current.runtime.gpuVendor;
-    const acceleratable = vendor === "nvidia" || vendor === "amd";
     // GPU was enabled but we are still on CPU — the bundle failed to load. Be honest about it
     // instead of showing the same "speed me up" upsell that just restarted into a fallback.
     if (currentConfig?.gpuEnabled && device === "cpu") return "gpu-stalled";
-    if (device === "cpu" && acceleratable) return "cpu-upsell";
+    if (device === "cpu" && vendor === "nvidia") return "cpu-upsell";
+    if (device === "cpu" && vendor === "amd") return "cpu-amd";
     return null;
   }
 
@@ -1789,15 +1801,59 @@
   }
 
   function modelSummary(model: ModelProfile | ModelCatalogEntry) {
-    if (uiLang !== "ru") return model.description;
-    const summaries: Record<string, string> = {
-      "nllb-200-distilled-600m-onnx": "Рекомендуемая модель для старта. Быстрая, сотни языков, работает и на процессоре, и на видеокарте.",
-      "nllb-200-distilled-1.3b-onnx": "Та же поддержка 200 языков, но качество выше. Медленнее и нужно ~4 ГБ ОЗУ. Работает на процессоре или видеокарте — берите только ради качества.",
-      "tencent-hy-mt2-1.8b-gguf": "Компактная многоязычная GGUF-модель. Высокое качество перевода при скромном размере.",
-      "translategemma-4b-gguf": "Качественная GGUF-модель от Google для мощных ПК (нужно ~8 ГБ ОЗУ). Требует явного выбора исходного языка.",
-      "milmmt-46-1b-gguf": "GGUF-модель с хорошим балансом размера и качества, включая словацкий язык.",
+    const summaries: Record<string, { en: string; ru: string; sk: string }> = {
+      "nllb-200-distilled-600m-onnx": {
+        en: "Recommended broad-coverage local model. Downloads once and then works offline.",
+        ru: "Рекомендуемая модель для старта. Быстрая, сотни языков, работает на процессоре и видеокарте.",
+        sk: "Odporúčaný lokálny model so širokým pokrytím. Stiahne sa raz a potom funguje offline.",
+      },
+      "nllb-200-distilled-1.3b-onnx": {
+        en: "Higher-quality NLLB variant. Same 200 languages, better translation but slower and needs ~4 GB RAM.",
+        ru: "Та же поддержка 200 языков, но качество выше. Медленнее, нужно ~4 ГБ ОЗУ.",
+        sk: "Kvalitnejší variant NLLB. Rovnakých 200 jazykov, lepší preklad, ale pomalší a vyžaduje ~4 GB RAM.",
+      },
+      "opus-mt-marian-onnx": {
+        en: "Lightweight models for specific popular language pairs.",
+        ru: "Лёгкие модели для популярных языковых пар.",
+        sk: "Odľahčené modely pre konkrétne populárne jazykové páry.",
+      },
+      "tencent-hy-mt2-1.8b-gguf": {
+        en: "Compact high-quality local GGUF translation model. 131 languages.",
+        ru: "Компактная GGUF-модель высокого качества. 131 язык.",
+        sk: "Kompaktný lokálny GGUF model vysokej kvality. 131 jazykov.",
+      },
+      "translategemma-4b-gguf": {
+        en: "High-quality model for machines with 8 GB+ RAM.",
+        ru: "Качественная GGUF-модель от Google для мощных ПК (нужно ~8 ГБ ОЗУ).",
+        sk: "Kvalitný model pre počítače s 8 GB+ RAM.",
+      },
+      "milmmt-46-1b-gguf": {
+        en: "Small multilingual translation model. Needs GGUF conversion before download is enabled.",
+        ru: "Небольшая многоязычная GGUF-модель, включая словацкий.",
+        sk: "Malý viacjazykový prekladový model vrátane slovenčiny.",
+      },
+      "deepl-api": {
+        en: "Network translation provider. Disabled by default; needs your own API key.",
+        ru: "Облачный переводчик DeepL. Отключён по умолчанию — нужен собственный API-ключ.",
+        sk: "Sieťový poskytovateľ prekladu. Predvolene vypnutý; vyžaduje vlastný API kľúč.",
+      },
+      "google-api": {
+        en: "Network translation provider. Disabled by default; needs your own API key.",
+        ru: "Google Cloud Translate. Отключён по умолчанию — нужен собственный API-ключ.",
+        sk: "Sieťový poskytovateľ prekladu. Predvolene vypnutý; vyžaduje vlastný API kľúč.",
+      },
+      "yandex-api": {
+        en: "Network translation provider. Disabled by default; needs your own API key and folder ID.",
+        ru: "Yandex Cloud Translate. Отключён по умолчанию — нужен API-ключ и ID папки.",
+        sk: "Sieťový poskytovateľ prekladu. Predvolene vypnutý; vyžaduje API kľúč a ID priečinka.",
+      },
+      "custom-local": {
+        en: "Advanced profile for your own GGUF model or OpenAI-compatible local endpoint.",
+        ru: "Расширенный профиль: своя GGUF-модель или OpenAI-совместимый локальный сервер.",
+        sk: "Pokročilý profil pre vlastný GGUF model alebo lokálny OpenAI-kompatibilný endpoint.",
+      },
     };
-    return summaries[model.id] ?? model.description;
+    return summaries[model.id]?.[uiLang] ?? model.description;
   }
 
   function modelDetail(model: ModelProfile | ModelCatalogEntry) {
@@ -2022,6 +2078,11 @@
                   </div>
                   <button type="button" class="accel-cta" on:click={() => (showAccelInfo = true)}>{t("accelLearnMore")}</button>
                 </aside>
+              {:else if accelMode === "cpu-amd"}
+                <aside class="accel-banner">
+                  <Cpu size={15} />
+                  <span class="accel-message">{accelText("accelOnCpuBodyGpu")} {t("accelAmdNotAvailable")}</span>
+                </aside>
               {/if}
             {/if}
           </section>
@@ -2034,6 +2095,12 @@
               <span class="pill" class:ok={localModelReady}><CheckCircle2 size={13} /> {modelPillLabel()}</span>
             </div>
             <p class="muted">{modelReadinessSummary()}</p>
+            {#if snapshot}
+              {@const device = snapshot.runtime.onnxDevice ?? snapshot.runtime.selectedDevice}
+              {#if device}
+                <p class="running-on-line">{device !== "cpu" ? accelText("runningSummaryGpu") : t("runningSummaryCpu")}</p>
+              {/if}
+            {/if}
             <h3>{t("builtInModels")}</h3>
             <div class="model-manager">
               {#if curatedModels.length}
@@ -2043,7 +2110,7 @@
                     <strong>{model.name}</strong>
                     <span>{modelDownloadSize(model)}</span>
                   </div>
-                  <p>{model.description}</p>
+                  <p>{modelSummary(model)}</p>
                   <p class="detail">{specModelDetail(model)}</p>
                   <dl>
                     <div><dt>{t("size")}</dt><dd>{modelDownloadSize(model)}</dd></div>
@@ -3051,6 +3118,12 @@
     color: var(--muted-text);
     font-size: 13px;
     line-height: 1.4;
+  }
+
+  .running-on-line {
+    margin: 4px 0 0;
+    font-size: 12px;
+    color: var(--muted-text);
   }
 
   .pill {
