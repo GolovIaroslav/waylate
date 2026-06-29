@@ -583,6 +583,7 @@
       loading: "Loading Waylate...",
       nothingToTranslate: "Nothing to translate.",
       translationCopied: "Translation copied.",
+      clipboardError: "Could not copy. Is wl-clipboard installed?",
       settingsSaved: "Settings saved.",
       keySaved: "API key saved.",
       keyRemoved: "API key removed.",
@@ -737,6 +738,7 @@
       loading: "Загрузка Waylate...",
       nothingToTranslate: "Нечего переводить.",
       translationCopied: "Перевод скопирован.",
+      clipboardError: "Не удалось скопировать. Установлен ли wl-clipboard?",
       settingsSaved: "Настройки сохранены.",
       keySaved: "API-ключ сохранён.",
       keyRemoved: "API-ключ удалён.",
@@ -891,6 +893,7 @@
       loading: "Načítava sa Waylate...",
       nothingToTranslate: "Nie je čo preložiť.",
       translationCopied: "Preklad skopírovaný.",
+      clipboardError: "Nepodarilo sa skopírovať. Je nainštalovaný wl-clipboard?",
       settingsSaved: "Nastavenia uložené.",
       keySaved: "API kľúč uložený.",
       keyRemoved: "API kľúč odstránený.",
@@ -1141,8 +1144,12 @@
 
   async function copyTranslation() {
     if (!translatedText.trim()) return;
-    await invoke("write_clipboard_text", { text: translatedText });
-    status = t("translationCopied");
+    try {
+      await invoke("write_clipboard_text", { text: translatedText });
+      status = t("translationCopied");
+    } catch (err) {
+      error = t("clipboardError");
+    }
   }
 
   function swapLanguages() {
@@ -1275,7 +1282,7 @@
     }
   }
 
-  async function removeModel(modelId: string) {
+  async function removeModel(modelId: string): Promise<boolean> {
     downloading = true;
     error = "";
     status = "";
@@ -1289,16 +1296,20 @@
       modelStatuses = { ...modelStatuses, [modelId]: "notInstalled" };
       await refresh();
       status = t("settingsSaved");
+      return true;
     } catch (err) {
       error = friendlyErrorMessage(err);
+      return false;
     } finally {
       downloading = false;
     }
   }
 
   async function reinstallModel(modelId: string) {
-    await removeModel(modelId);
-    if (error) return;
+    // Use removeModel's own result instead of reading the shared `error`, which another
+    // event handler could change between the two awaits (TOCTOU).
+    const removed = await removeModel(modelId);
+    if (!removed) return;
     await downloadModel(modelId);
   }
 
