@@ -93,70 +93,42 @@ fn translate_spec_managed_llama(
     let model_path = resolve_spec_gguf_path(paths, entry)
         .ok_or_else(|| "This model is not installed — Download it in Settings.".to_string())?;
 
-    let (translated, device) = if entry.id == "translategemma-4b-gguf" {
-        if request.source_lang == "auto" {
-            return Err("TranslateGemma needs an explicit source language.".into());
-        }
-        runtime::translate_via_spec_llama_chat(
-            runtime_manager,
-            paths,
-            config,
-            &request.model_id,
-            &model_path,
-            4096,
-            json!({
-                "model": "managed-local-gguf",
-                "messages": [{
-                    "role": "user",
-                    "content": [{
-                        "type": "text",
-                        "source_lang_code": request.source_lang.replace('_', "-"),
-                        "target_lang_code": request.target_lang.replace('_', "-"),
-                        "text": request.text,
-                    }]
-                }],
-                "temperature": 0.1
-            }),
-            on_progress,
-        )?
-    } else {
-        let template = entry
+    let template = entry
         .prompt_template
         .as_deref()
         .unwrap_or("Translate the following text from {source} to {target}. Return only the translation.\n\n{text}");
 
-        let source_name = entry
-            .languages
-            .iter()
-            .find(|l| l.ui_code == request.source_lang)
-            .and_then(|l| l.llm_language_name.as_deref())
-            .unwrap_or(&request.source_lang);
-        let target_name = entry
-            .languages
-            .iter()
-            .find(|l| l.ui_code == request.target_lang)
-            .and_then(|l| l.llm_language_name.as_deref())
-            .unwrap_or(&request.target_lang);
+    let source_name = entry
+        .languages
+        .iter()
+        .find(|l| l.ui_code == request.source_lang)
+        .and_then(|l| l.llm_language_name.as_deref())
+        .unwrap_or(&request.source_lang);
+    let target_name = entry
+        .languages
+        .iter()
+        .find(|l| l.ui_code == request.target_lang)
+        .and_then(|l| l.llm_language_name.as_deref())
+        .unwrap_or(&request.target_lang);
 
-        let prompt = template
-            .replace("{source}", source_name)
-            .replace("{target}", target_name)
-            .replace("{text}", &request.text);
+    let prompt = template
+        .replace("{source}", source_name)
+        .replace("{target}", target_name)
+        .replace("{text}", &request.text);
 
-        let context_size = entry.min_ram_bytes.map(|_| 4096u32).unwrap_or(4096);
+    let context_size = entry.min_ram_bytes.map(|_| 4096u32).unwrap_or(4096);
 
-        runtime::translate_via_spec_llama(
-            runtime_manager,
-            paths,
-            config,
-            &request.model_id,
-            &model_path,
-            context_size,
-            &entry.prompt_style,
-            &prompt,
-            on_progress,
-        )?
-    };
+    let (translated, device) = runtime::translate_via_spec_llama(
+        runtime_manager,
+        paths,
+        config,
+        &request.model_id,
+        &model_path,
+        context_size,
+        &entry.prompt_style,
+        &prompt,
+        on_progress,
+    )?;
 
     Ok(TranslationResponse {
         translated_text: translated,
@@ -359,16 +331,21 @@ fn translate_google(
 ) -> Result<TranslationResponse, String> {
     ensure_network_enabled(config)?;
     let key = secrets::get("google")?;
+    // Google Translate auto-detects the language when "source" is omitted; passing
+    // "auto" as a source code is rejected, so only send it for explicit languages.
+    let mut form = vec![
+        ("q", request.text.as_str()),
+        ("target", request.target_lang.as_str()),
+        ("format", "text"),
+    ];
+    if request.source_lang != "auto" {
+        form.push(("source", request.source_lang.as_str()));
+    }
     let value: Value = Client::new()
         .post(format!(
             "https://translation.googleapis.com/language/translate/v2?key={key}"
         ))
-        .form(&[
-            ("q", request.text.as_str()),
-            ("target", request.target_lang.as_str()),
-            ("source", request.source_lang.as_str()),
-            ("format", "text"),
-        ])
+        .form(&form)
         .send()
         .map_err(|err| format!("Could not reach Google Translate: {err}"))?
         .error_for_status()

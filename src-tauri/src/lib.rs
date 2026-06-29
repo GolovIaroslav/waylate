@@ -526,8 +526,25 @@ async fn enable_gpu_acceleration(app: AppHandle, state: State<'_, AppState>) -> 
     .map_err(|err| err.to_string())??;
 
     // ORT resolves its library once per process, so the GPU runtime only takes effect after a
-    // restart (which also re-execs with the bundle on LD_LIBRARY_PATH). `restart` diverges.
+    // restart. We no longer restart automatically here — the window vanishing with no warning
+    // felt like a crash. The frontend now asks the user to restart once the download is done.
+    let _ = app;
+    Ok(())
+}
+
+/// Restart the app on user request (e.g. to apply GPU acceleration). `restart` diverges.
+#[tauri::command]
+fn restart_app(app: AppHandle) {
     app.restart()
+}
+
+/// Unload all in-memory translation models: stop managed GGUF servers and drop cached
+/// ONNX sessions so RAM/VRAM is freed until the next translation reloads on demand.
+#[tauri::command]
+fn unload_models(state: State<'_, AppState>) -> Result<(), String> {
+    state.runtime.shutdown_all()?;
+    engines::onnx_mt::unload_all();
+    Ok(())
 }
 
 /// Turn GPU translation off and restart back onto the bundled CPU runtime. The downloaded
@@ -1781,7 +1798,9 @@ pub fn run() {
             download_catalog_model,
             cancel_model_download,
             enable_gpu_acceleration,
-            disable_gpu_acceleration
+            disable_gpu_acceleration,
+            restart_app,
+            unload_models
         ])
         .run(tauri::generate_context!())
         .expect("error while running Waylate");

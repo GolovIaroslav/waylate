@@ -23,8 +23,13 @@ pub fn set(provider: &str, value: &str) -> Result<(), String> {
 }
 
 pub fn delete(provider: &str) -> Result<(), String> {
-    Entry::new(SERVICE, provider)
+    match Entry::new(SERVICE, provider)
         .map_err(|err| format!("Could not open keyring entry: {err}"))?
         .delete_credential()
-        .map_err(|err| format!("Could not delete API key: {err}"))
+    {
+        Ok(()) => Ok(()),
+        // Clearing an empty field is a no-op, not an error.
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(err) => Err(format!("Could not delete API key: {err}")),
+    }
 }

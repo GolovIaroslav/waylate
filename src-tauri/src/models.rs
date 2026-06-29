@@ -257,7 +257,7 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
             license: "CC-BY-NC-4.0".into(),
             license_url: "https://creativecommons.org/licenses/by-nc/4.0/".into(),
             homepage: "https://huggingface.co/facebook/nllb-200-distilled-1.3B".into(),
-            description: "Higher-quality NLLB variant. Same 200 languages, better translation. Needs ~4 GB RAM.".into(),
+            description: "Higher-quality NLLB variant. Same 200 languages, better translation but slower and needs ~4 GB RAM. Runs on CPU or GPU like the 600M model — pick it only if you want better quality.".into(),
             languages: languages.clone(),
             actual_language_count: Some(200),
             files: vec![
@@ -345,7 +345,7 @@ pub fn model_catalog() -> Vec<ModelCatalogEntry> {
             estimated_download_bytes: 3 * 1024 * 1024 * 1024,
             estimated_disk_bytes: 3 * 1024 * 1024 * 1024,
             min_ram_bytes: Some(8 * 1024 * 1024 * 1024),
-            downloadable: false,
+            downloadable: true,
         },
         ModelCatalogEntry {
             id: "milmmt-46-1b-gguf".into(),

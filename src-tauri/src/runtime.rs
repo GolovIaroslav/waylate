@@ -258,6 +258,12 @@ impl RuntimeManager {
             .arg(context_size.to_string())
             .arg("-ngl")
             .arg("99");
+        if profile_id == "translategemma-4b-gguf" {
+            // This GGUF ships a strict Jinja chat template that fails llama-server's
+            // load-time validation (it requires a structured content object), which
+            // aborts the server before it can serve. Force the built-in gemma template.
+            command.arg("--chat-template").arg("gemma");
+        }
         let log_path = runtime_log_path(paths, "llama-server.log");
         let logs = runtime_log_files_for_path(&log_path)?;
         let mut child = command
@@ -634,35 +640,6 @@ pub fn translate_via_spec_llama(
         let system = "You are a precise translation engine. Do not explain your answer.";
         stream_chat_completion(&endpoint.endpoint, system, prompt, on_progress)?
     };
-    Ok((translated, endpoint.device))
-}
-
-pub fn translate_via_spec_llama_chat(
-    manager: &RuntimeManager,
-    paths: &AppPaths,
-    config: &AppConfig,
-    profile_id: &str,
-    model_path: &str,
-    context_size: u32,
-    mut body: Value,
-    on_progress: &mut dyn FnMut(&str) -> Result<(), String>,
-) -> Result<(String, String), String> {
-    let endpoint = manager.ensure_llama_server_with_model(
-        paths,
-        config,
-        profile_id,
-        model_path,
-        context_size,
-    )?;
-    body["stream"] = serde_json::json!(true);
-    let response = Client::new()
-        .post(format!("{}/v1/chat/completions", endpoint.endpoint))
-        .json(&body)
-        .send()
-        .map_err(|err| format!("Local model could not process translation: {err}"))?
-        .error_for_status()
-        .map_err(|err| format!("Local model returned an error: {err}"))?;
-    let translated = parse_sse_chat_stream(response, on_progress)?;
     Ok((translated, endpoint.device))
 }
 

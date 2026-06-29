@@ -56,6 +56,14 @@ pub fn unload(profile_id: &str) {
     }
 }
 
+pub fn unload_all() {
+    if let Some(cache) = MODEL_CACHE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            cache.clear();
+        }
+    }
+}
+
 /// Private directory holding the downloaded GPU onnxruntime (libonnxruntime.so + CUDA
 /// provider libs). Kept out of the system so it never clashes with the OS onnxruntime.
 pub fn gpu_runtime_dir(paths: &AppPaths) -> PathBuf {

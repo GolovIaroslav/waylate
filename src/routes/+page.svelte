@@ -13,6 +13,7 @@
     FolderOpen,
     History,
     Languages,
+    Power,
     RefreshCw,
     Repeat2,
     Settings,
@@ -121,6 +122,7 @@
     yandexFolderId: string;
     uiLanguage: string;
     theme: string;
+    gpuEnabled: boolean;
   };
 
   type HistoryEntry = {
@@ -230,7 +232,6 @@
   let configSaveQueued = false;
   let modelProfiles: ModelCatalogEntry[] = [];
   let modelStatuses: Record<string, string> = {};
-  let secretSaveTimers: Partial<Record<SecretProvider, number>> = {};
   let runtimeLogName = "llama-server.log";
   let runtimeLogText = "";
   let runtimeLogLoading = false;
@@ -239,6 +240,10 @@
   let gpuProgress = 0;
   let gpuMessage = "";
   let gpuError = "";
+  let gpuReadyRestart = false;
+  let footerCollapsed = false;
+  let recentLangs: string[] = [];
+  let unloadingModels = false;
 
   type SecretProvider = "deepl" | "google" | "yandex" | "openai-compatible";
 
@@ -248,6 +253,13 @@
   $: localModelReady = Boolean(selectedModel && (specModelState(selectedModel.id) === "installed" || isModelInstalled(selectedModel.id) || hasInstalledModelFiles()));
   $: curatedModels = modelProfiles;
   $: selectableModels = availableTranslateModels(snapshot, config);
+  $: networkProviderIds = new Set(["deepl-api", "google-api", "yandex-api"]);
+  $: localSelectableModels = selectableModels.filter((m) => !networkProviderIds.has(m.id));
+  $: networkSelectableModels = selectableModels.filter((m) => networkProviderIds.has(m.id));
+  // Reactive so the button re-enables the moment translating/testing finishes or a source
+  // becomes available — a plain function call in markup would not track these and could get
+  // stuck disabled until an unrelated re-render (e.g. switching tabs).
+  $: canTranslateNow = !translating && !testing && selectableModels.length > 0;
   $: if (config && selectableModels.length && !selectableModels.find((m) => m.id === config?.modelId)) {
     changeModel(selectableModels[0].id);
   }
@@ -256,7 +268,7 @@
   //   "gpu"        — local translation is actually running on a GPU (success pill)
   //   "cpu-upsell" — running on CPU but a usable GPU (NVIDIA/AMD) exists → offer to speed up
   //   null         — nothing actionable (no model loaded yet, or no usable GPU)
-  $: accelMode = computeAccelMode(snapshot);
+  $: accelMode = computeAccelMode(snapshot, config);
   $: if (config) applyTheme(config.theme);
   $: if (config && snapshot) scheduleConfigSave();
 
@@ -548,6 +560,9 @@
       autostart: "Start Waylate in background",
       networkApis: "Allow network API providers",
       apiKeysNote: "DeepL, Google and Yandex need your own key.",
+      apiKeysActivationNote: "Save a key and turn on network access below to add that provider to the Model picker.",
+      localModelsGroup: "Local models",
+      onlineProvidersGroup: "Online (API key)",
       deeplKey: "DeepL API key",
       googleKey: "Google API key",
       yandexKey: "Yandex API key",
@@ -620,6 +635,16 @@
       accelErrorTitle: "Could not turn it on",
       accelRetry: "Try again",
       accelDisable: "Switch back to processor",
+      accelStalledTitle: "GPU is on, but translation is still using the processor",
+      accelStalledBody: "The graphics runtime could not load, so Waylate fell back to the processor.",
+      accelReadyRestart: "Graphics acceleration is ready. Restart Waylate to switch to the GPU.",
+      accelRestartNow: "Restart now",
+      keySave: "Save",
+      modelsUnloaded: "Models unloaded from memory.",
+      unloadModel: "Unload model from memory",
+      recentLanguages: "Recently used",
+      apiKeysStorageNote: "Keys are stored only in your system keychain on this computer — never in the app files or online.",
+      footerToggle: "Show/hide details",
     },
     ru: {
       translate: "Перевести",
@@ -683,6 +708,9 @@
       autostart: "Запускать Waylate в фоне",
       networkApis: "Разрешить сетевые API-провайдеры",
       apiKeysNote: "Для DeepL, Google и Yandex нужен Ваш ключ.",
+      apiKeysActivationNote: "Сохраните ключ и включите сетевой доступ ниже — провайдер появится в выборе модели.",
+      localModelsGroup: "Локальные модели",
+      onlineProvidersGroup: "Онлайн (по API-ключу)",
       deeplKey: "DeepL API key",
       googleKey: "Google API key",
       yandexKey: "Yandex API key",
@@ -755,6 +783,16 @@
       accelErrorTitle: "Не получилось включить",
       accelRetry: "Попробовать снова",
       accelDisable: "Вернуться на процессор",
+      accelStalledTitle: "Видеокарта включена, но перевод всё ещё на процессоре",
+      accelStalledBody: "Графический runtime не загрузился, поэтому Waylate вернулся на процессор.",
+      accelReadyRestart: "Ускорение готово. Перезапустите Waylate, чтобы включить видеокарту.",
+      accelRestartNow: "Перезапустить",
+      keySave: "Сохранить",
+      modelsUnloaded: "Модели выгружены из памяти.",
+      unloadModel: "Выгрузить модель из памяти",
+      recentLanguages: "Недавние",
+      apiKeysStorageNote: "Ключи хранятся только в системном хранилище паролей на этом компьютере — не в файлах приложения и не в сети.",
+      footerToggle: "Показать/скрыть детали",
     },
     sk: {
       translate: "Preložiť",
@@ -818,6 +856,9 @@
       autostart: "Spúšťať Waylate na pozadí",
       networkApis: "Povoliť sieťových API providerov",
       apiKeysNote: "DeepL, Google a Yandex potrebujú Váš kľúč.",
+      apiKeysActivationNote: "Uložte kľúč a nižšie zapnite sieťový prístup — poskytovateľ sa pridá do výberu modelu.",
+      localModelsGroup: "Lokálne modely",
+      onlineProvidersGroup: "Online (API kľúč)",
       deeplKey: "DeepL API key",
       googleKey: "Google API key",
       yandexKey: "Yandex API key",
@@ -890,6 +931,16 @@
       accelErrorTitle: "Nepodarilo sa zapnúť",
       accelRetry: "Skúsiť znova",
       accelDisable: "Späť na procesor",
+      accelStalledTitle: "Grafická karta je zapnutá, ale preklad stále beží na procesore",
+      accelStalledBody: "Grafický runtime sa nepodarilo načítať, preto sa Waylate vrátil na procesor.",
+      accelReadyRestart: "Zrýchlenie je pripravené. Reštartujte Waylate na prepnutie na GPU.",
+      accelRestartNow: "Reštartovať",
+      keySave: "Uložiť",
+      modelsUnloaded: "Modely uvoľnené z pamäte.",
+      unloadModel: "Uvoľniť model z pamäte",
+      recentLanguages: "Nedávne",
+      apiKeysStorageNote: "Kľúče sú uložené iba v systémovom úložisku hesiel v tomto počítači — nie v súboroch aplikácie ani online.",
+      footerToggle: "Zobraziť/skryť detaily",
     },
   } as const;
 
@@ -899,6 +950,13 @@
     let unlistenTranslation: (() => void) | undefined;
     const savedScale = Number(localStorage.getItem("waylate-ui-scale"));
     setUiScale(Number.isFinite(savedScale) && savedScale >= 1 ? savedScale : 1);
+    try {
+      const savedRecent = JSON.parse(localStorage.getItem("waylate-recent-langs") ?? "[]");
+      if (Array.isArray(savedRecent)) recentLangs = savedRecent.filter((c) => typeof c === "string").slice(0, 5);
+    } catch {
+      recentLangs = [];
+    }
+    footerCollapsed = localStorage.getItem("waylate-footer-collapsed") === "1";
     const handleKeydown = (event: KeyboardEvent) => {
       if (!event.ctrlKey) return;
       if (event.key === "+" || event.key === "=") {
@@ -1085,6 +1143,11 @@
     const nextLanguages = normalizedLanguages(nextModel);
     config.sourceLang = closestLanguage(config.sourceLang, nextLanguages, true);
     config.targetLang = closestLanguage(config.targetLang, nextLanguages, false);
+    // Online providers (DeepL/Google/Yandex) auto-detect the source, so default to "auto"
+    // and let the user translate without picking a source language every time.
+    if (networkProviderIds.has(modelId) && nextLanguages.some((l) => l.code === "auto")) {
+      config.sourceLang = "auto";
+    }
   }
 
   function closestLanguage(current: string, nextLanguages: UiLanguageOption[], allowAuto: boolean) {
@@ -1098,12 +1161,20 @@
 
   async function saveKey(provider: SecretProvider, value: string) {
     error = "";
+    const trimmed = value.trim();
+    if (!trimmed) return;
     try {
-      await invoke("save_api_key", { provider, key: value });
+      await invoke("save_api_key", { provider, key: trimmed });
       if (provider === "deepl") deeplKey = "";
       if (provider === "google") googleKey = "";
       if (provider === "yandex") yandexKey = "";
       if (provider === "openai-compatible") localKey = "";
+      // Saving a network key without enabling the providers would leave it unused, so turn
+      // the network providers on automatically — that is clearly what the user intended.
+      if (config && provider !== "openai-compatible" && !config.apiProviderEnabled) {
+        config.apiProviderEnabled = true;
+        await persistConfig(false);
+      }
       await refresh();
       status = t("keySaved");
     } catch (err) {
@@ -1126,17 +1197,26 @@
     }
   }
 
-  function scheduleKeySave(provider: SecretProvider, value: string) {
-    if (secretSaveTimers[provider]) {
-      window.clearTimeout(secretSaveTimers[provider]);
+  async function unloadModels() {
+    if (unloadingModels) return;
+    unloadingModels = true;
+    error = "";
+    try {
+      await invoke("unload_models");
+      await refresh();
+      status = t("modelsUnloaded");
+    } catch (err) {
+      error = String(err);
+    } finally {
+      unloadingModels = false;
     }
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return;
+  }
+
+  function toggleFooter() {
+    footerCollapsed = !footerCollapsed;
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("waylate-footer-collapsed", footerCollapsed ? "1" : "0");
     }
-    secretSaveTimers[provider] = window.setTimeout(() => {
-      void saveKey(provider, trimmed);
-    }, 450);
   }
 
   async function downloadModel(modelId: string) {
@@ -1276,6 +1356,23 @@
       targetLanguageQuery = "";
       targetLanguageOpen = false;
     }
+    pushRecentLang(code);
+  }
+
+  // Remember the last 5 distinct languages the user picked (excluding auto-detect), most
+  // recent first, persisted locally so they surface at the top of the language menus.
+  function pushRecentLang(code: string) {
+    if (!code || code === "auto") return;
+    recentLangs = [code, ...recentLangs.filter((c) => c !== code)].slice(0, 5);
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("waylate-recent-langs", JSON.stringify(recentLangs));
+    }
+  }
+
+  function recentLanguageOptions(includeAuto: boolean): UiLanguageOption[] {
+    return recentLangs
+      .map((code) => languages.find((l) => l.code === code))
+      .filter((l): l is UiLanguageOption => Boolean(l) && (includeAuto || l!.code !== "auto"));
   }
 
   function languageLabel(code: string) {
@@ -1411,28 +1508,46 @@
       .filter((model): model is ModelCatalogEntry => Boolean(model));
   }
 
+  // Network providers become selectable translation sources only once the user has
+  // saved their key and enabled network access — i.e. driven "by API key", not by install.
+  function enabledNetworkProviders(currentSnapshot = snapshot, currentConfig = config) {
+    if (!currentSnapshot || !currentConfig?.apiProviderEnabled) return [];
+    const byId = (id: string) => currentSnapshot.catalog.find((m) => m.id === id);
+    const out: ModelProfile[] = [];
+    if (currentSnapshot.hasDeeplKey) { const m = byId("deepl-api"); if (m) out.push(m); }
+    if (currentSnapshot.hasGoogleKey) { const m = byId("google-api"); if (m) out.push(m); }
+    if (currentSnapshot.hasYandexKey && currentConfig.yandexFolderId?.trim()) {
+      const m = byId("yandex-api"); if (m) out.push(m);
+    }
+    return out;
+  }
+
   function availableTranslateModels(currentSnapshot = snapshot, currentConfig = config) {
     if (!currentSnapshot) return [];
+    const network = enabledNetworkProviders(currentSnapshot, currentConfig);
 
     // Prioritize spec models from modelProfiles
     const specModels = modelProfiles.filter(m => specModelState(m.id) === "installed");
-    if (specModels.length) return specModels;
+    if (specModels.length) return [...specModels, ...network];
 
     // Fallback to legacy installed models
     const installed = new Set(currentSnapshot.installedModelIds);
     const legacyCatalog = currentSnapshot.catalog;
     const readyLegacy = legacyCatalog.filter(m => installed.has(m.id));
-    if (readyLegacy.length) return readyLegacy;
+    if (readyLegacy.length) return [...readyLegacy, ...network];
 
-    // If nothing installed, at least show the selected model if it exists
-    if (!currentConfig) return [];
-    const currentSpec = modelProfiles.find(m => m.id === currentConfig.modelId);
-    if (currentSpec) return [currentSpec];
-
-    const currentLegacy = legacyCatalog.find(m => m.id === currentConfig.modelId);
-    if (currentLegacy) return [currentLegacy];
-
-    return [];
+    // Nothing installed locally — still expose network providers and the current selection.
+    const local: TranslateModel[] = [];
+    if (currentConfig) {
+      const currentSpec = modelProfiles.find(m => m.id === currentConfig.modelId);
+      if (currentSpec) {
+        local.push(currentSpec);
+      } else {
+        const currentLegacy = legacyCatalog.find(m => m.id === currentConfig.modelId);
+        if (currentLegacy && !network.some(n => n.id === currentLegacy.id)) local.push(currentLegacy);
+      }
+    }
+    return [...local, ...network];
   }
 
   function configStateSignature(next: AppConfig) {
@@ -1497,13 +1612,19 @@
     return uiTexts[uiLang][key];
   }
 
-  function computeAccelMode(current = snapshot): "gpu" | "cpu-upsell" | null {
+  function computeAccelMode(
+    current = snapshot,
+    currentConfig = config,
+  ): "gpu" | "cpu-upsell" | "gpu-stalled" | null {
     if (!current) return null;
     // Prefer the local translator's device; fall back to any active GGUF runtime.
     const device = current.runtime.onnxDevice ?? current.runtime.selectedDevice;
     if (device && device !== "cpu") return "gpu";
     const vendor = current.runtime.gpuVendor;
     const acceleratable = vendor === "nvidia" || vendor === "amd";
+    // GPU was enabled but we are still on CPU — the bundle failed to load. Be honest about it
+    // instead of showing the same "speed me up" upsell that just restarted into a fallback.
+    if (currentConfig?.gpuEnabled && device === "cpu") return "gpu-stalled";
     if (device === "cpu" && acceleratable) return "cpu-upsell";
     return null;
   }
@@ -1517,19 +1638,32 @@
     return t(key).replace("{gpu}", accelGpuName());
   }
 
-  // Download the GPU runtime + fp16 model and switch over. The backend restarts the app on
-  // success, so this call never resolves normally — a returned error means it failed first.
+  // Download the GPU runtime + fp16 model. The backend used to restart the app itself, which
+  // looked like a crash (window vanished). Now it just downloads, and we ask the user to
+  // restart when it is ready so the change is intentional and visible.
   async function enableGpu() {
     if (gpuBusy) return;
     gpuBusy = true;
     gpuError = "";
     gpuProgress = 0;
     gpuMessage = "";
+    gpuReadyRestart = false;
     try {
       await invoke("enable_gpu_acceleration");
+      showAccelInfo = false;
+      gpuReadyRestart = true;
     } catch (err) {
       gpuError = String(err);
+    } finally {
       gpuBusy = false;
+    }
+  }
+
+  async function restartApp() {
+    try {
+      await invoke("restart_app");
+    } catch (err) {
+      error = String(err);
     }
   }
 
@@ -1654,16 +1788,13 @@
     return t("download");
   }
 
-  function canTranslate() {
-    return !translating && !testing && !downloading && selectableModels.length > 0;
-  }
-
   function modelSummary(model: ModelProfile | ModelCatalogEntry) {
     if (uiLang !== "ru") return model.description;
     const summaries: Record<string, string> = {
-      "nllb-200-distilled-600m-onnx": "Рекомендуемая модель для старта. Работает быстро, поддерживает сотни языков и не требует GPU.",
+      "nllb-200-distilled-600m-onnx": "Рекомендуемая модель для старта. Быстрая, сотни языков, работает и на процессоре, и на видеокарте.",
+      "nllb-200-distilled-1.3b-onnx": "Та же поддержка 200 языков, но качество выше. Медленнее и нужно ~4 ГБ ОЗУ. Работает на процессоре или видеокарте — берите только ради качества.",
       "tencent-hy-mt2-1.8b-gguf": "Компактная многоязычная GGUF-модель. Высокое качество перевода при скромном размере.",
-      "translategemma-4b-gguf": "Качественная GGUF-модель от Google для мощных ПК. Пока выключена: требуется принятие лицензии Gemma.",
+      "translategemma-4b-gguf": "Качественная GGUF-модель от Google для мощных ПК (нужно ~8 ГБ ОЗУ). Требует явного выбора исходного языка.",
       "milmmt-46-1b-gguf": "GGUF-модель с хорошим балансом размера и качества, включая словацкий язык.",
     };
     return summaries[model.id] ?? model.description;
@@ -1712,9 +1843,22 @@
               {t("model")}
               {#if selectableModels.length}
                 <select value={config.modelId} on:change={(event) => changeModel(event.currentTarget.value)}>
-                  {#each selectableModels as model}
-                    <option value={model.id}>{model.name}</option>
-                  {/each}
+                  {#if networkSelectableModels.length}
+                    <optgroup label={t("localModelsGroup")}>
+                      {#each localSelectableModels as model}
+                        <option value={model.id}>{model.name}</option>
+                      {/each}
+                    </optgroup>
+                    <optgroup label={t("onlineProvidersGroup")}>
+                      {#each networkSelectableModels as model}
+                        <option value={model.id}>{model.name}</option>
+                      {/each}
+                    </optgroup>
+                  {:else}
+                    {#each selectableModels as model}
+                      <option value={model.id}>{model.name}</option>
+                    {/each}
+                  {/if}
                 </select>
               {:else}
                 <select disabled>
@@ -1733,6 +1877,15 @@
                   <div class="combo-menu">
                     <input bind:value={sourceLanguageQuery} placeholder={t("searchLanguage")} />
                     <div class="combo-options">
+                      {#if !sourceLanguageQuery.trim() && recentLanguageOptions(true).length}
+                        <span class="combo-group">{t("recentLanguages")}</span>
+                        {#each recentLanguageOptions(true) as language}
+                          <button type="button" class:active={language.code === config.sourceLang} on:click={() => selectLanguage("source", language.code)}>
+                            <span>{language.name}</span>
+                          </button>
+                        {/each}
+                        <span class="combo-divider"></span>
+                      {/if}
                       {#each filteredLanguages(sourceLanguageQuery, true) as language}
                         <button type="button" class:active={language.code === config.sourceLang} on:click={() => selectLanguage("source", language.code)}>
                           <span>{language.name}</span>
@@ -1757,6 +1910,15 @@
                   <div class="combo-menu">
                     <input bind:value={targetLanguageQuery} placeholder={t("searchLanguage")} />
                     <div class="combo-options">
+                      {#if !targetLanguageQuery.trim() && recentLanguageOptions(false).length}
+                        <span class="combo-group">{t("recentLanguages")}</span>
+                        {#each recentLanguageOptions(false) as language}
+                          <button type="button" class:active={language.code === config.targetLang} on:click={() => selectLanguage("target", language.code)}>
+                            <span>{language.name}</span>
+                          </button>
+                        {/each}
+                        <span class="combo-divider"></span>
+                      {/if}
                       {#each filteredLanguages(targetLanguageQuery, false) as language}
                         <button type="button" class:active={language.code === config.targetLang} on:click={() => selectLanguage("target", language.code)}>
                           <span>{language.name}</span>
@@ -1767,8 +1929,11 @@
                 {/if}
               </div>
             </label>
-            <button class="primary run" on:click={translate} disabled={!canTranslate()}>
+            <button class="primary run" on:click={translate} disabled={!canTranslateNow}>
               <span class:spin={translating}><RefreshCw size={15} /></span> {t("translate")}
+            </button>
+            <button class="icon" title={t("unloadModel")} aria-label={t("unloadModel")} on:click={unloadModels} disabled={unloadingModels}>
+              <Power size={15} />
             </button>
             <div class="zoom-controls" aria-label="Interface zoom">
               <button class="icon small" title="Zoom out" aria-label="Zoom out" on:click={() => setUiScale(uiScale - 0.1)}><ZoomOut size={13} /></button>
@@ -1806,33 +1971,58 @@
           </section>
 
           <section class="translate-footer">
-            <section class="model-note">
-              {#if selectableModels.length && selectedModel}
-                <strong>{selectedModel.name}</strong>
-                <span>{modelReadinessSummary()}</span>
+            <div class="footer-bar">
+              {#if status || error}
+                <p class:error-note={Boolean(error)} class="inline-note">{error || status}</p>
               {:else}
-                <strong>{t("onboardingTitle")}</strong>
-                <span>{t("noModelsInstalled")}</span>
+                <span class="inline-note muted-note">{selectableModels.length && selectedModel ? selectedModel.name : ""}</span>
               {/if}
-            </section>
-            {#if status || error}
-              <p class:error-note={Boolean(error)} class="inline-note">{error || status}</p>
-            {/if}
-            {#if accelMode === "gpu"}
+              <button type="button" class="icon small footer-toggle" class:open={!footerCollapsed} title={t("footerToggle")} aria-label={t("footerToggle")} on:click={toggleFooter}>
+                <ChevronDown size={14} />
+              </button>
+            </div>
+            {#if gpuReadyRestart}
               <aside class="accel-banner fast">
                 <Zap size={15} />
-                <span class="accel-message">{t("accelOnGpu")}</span>
-                <button type="button" class="accel-cta" on:click={disableGpu}>{t("accelDisable")}</button>
+                <span class="accel-message">{t("accelReadyRestart")}</span>
+                <button type="button" class="accel-cta" on:click={restartApp}>{t("accelRestartNow")}</button>
               </aside>
-            {:else if accelMode === "cpu-upsell"}
-              <aside class="accel-banner">
-                <Cpu size={15} />
-                <div class="accel-message">
-                  <strong>{t("accelOnCpuTitle")}</strong>
-                  <span>{accelText("accelOnCpuBodyGpu")}</span>
-                </div>
-                <button type="button" class="accel-cta" on:click={() => (showAccelInfo = true)}>{t("accelLearnMore")}</button>
-              </aside>
+            {/if}
+            {#if !footerCollapsed}
+              <section class="model-note">
+                {#if selectableModels.length && selectedModel}
+                  <strong>{selectedModel.name}</strong>
+                  <span>{modelReadinessSummary()}</span>
+                {:else}
+                  <strong>{t("onboardingTitle")}</strong>
+                  <span>{t("noModelsInstalled")}</span>
+                {/if}
+              </section>
+              {#if accelMode === "gpu"}
+                <aside class="accel-banner fast">
+                  <Zap size={15} />
+                  <span class="accel-message">{t("accelOnGpu")}</span>
+                  <button type="button" class="accel-cta" on:click={disableGpu}>{t("accelDisable")}</button>
+                </aside>
+              {:else if accelMode === "gpu-stalled"}
+                <aside class="accel-banner">
+                  <Cpu size={15} />
+                  <div class="accel-message">
+                    <strong>{t("accelStalledTitle")}</strong>
+                    <span>{t("accelStalledBody")}</span>
+                  </div>
+                  <button type="button" class="accel-cta" on:click={disableGpu}>{t("accelDisable")}</button>
+                </aside>
+              {:else if accelMode === "cpu-upsell"}
+                <aside class="accel-banner">
+                  <Cpu size={15} />
+                  <div class="accel-message">
+                    <strong>{t("accelOnCpuTitle")}</strong>
+                    <span>{accelText("accelOnCpuBodyGpu")}</span>
+                  </div>
+                  <button type="button" class="accel-cta" on:click={() => (showAccelInfo = true)}>{t("accelLearnMore")}</button>
+                </aside>
+              {/if}
             {/if}
           </section>
         </section>
@@ -2043,10 +2233,13 @@
               <span>{t("networkApis")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "networkApis")} on:mouseenter={() => showHelp("networkApis")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "networkApis"}<span class="help-popover">{help("networkApis")}</span>{/if}</button></span>
             </label>
             <p class="muted">{t("apiKeysNote")}</p>
+            <p class="muted">{t("apiKeysActivationNote")}</p>
+            <p class="muted">{t("apiKeysStorageNote")}</p>
             <label>
               <span>{t("deeplKey")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "deeplKey")} on:mouseenter={() => showHelp("deeplKey")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "deeplKey"}<span class="help-popover">{help("deeplKey")}</span>{/if}</button></span>
               <div class="inline">
-                <input bind:value={deeplKey} type="password" placeholder={t("storedSecret")} on:input={() => scheduleKeySave("deepl", deeplKey)} />
+                <input bind:value={deeplKey} type="password" placeholder={t("storedSecret")} />
+                <button class="primary" on:click={() => saveKey("deepl", deeplKey)} disabled={!deeplKey.trim()}>{t("keySave")}</button>
                 <button on:click={() => clearKey("deepl")} title={t("clearField")} aria-label={t("clearField")}><Trash2 size={15} /></button>
               </div>
               {#if keyStateHint(snapshot.hasDeeplKey)}
@@ -2056,7 +2249,8 @@
             <label>
               <span>{t("googleKey")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "googleKey")} on:mouseenter={() => showHelp("googleKey")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "googleKey"}<span class="help-popover">{help("googleKey")}</span>{/if}</button></span>
               <div class="inline">
-                <input bind:value={googleKey} type="password" placeholder={t("storedSecret")} on:input={() => scheduleKeySave("google", googleKey)} />
+                <input bind:value={googleKey} type="password" placeholder={t("storedSecret")} />
+                <button class="primary" on:click={() => saveKey("google", googleKey)} disabled={!googleKey.trim()}>{t("keySave")}</button>
                 <button on:click={() => clearKey("google")} title={t("clearField")} aria-label={t("clearField")}><Trash2 size={15} /></button>
               </div>
               {#if keyStateHint(snapshot.hasGoogleKey)}
@@ -2066,7 +2260,8 @@
             <label>
               <span>{t("yandexKey")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "yandexKey")} on:mouseenter={() => showHelp("yandexKey")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "yandexKey"}<span class="help-popover">{help("yandexKey")}</span>{/if}</button></span>
               <div class="inline">
-                <input bind:value={yandexKey} type="password" placeholder={t("storedSecret")} on:input={() => scheduleKeySave("yandex", yandexKey)} />
+                <input bind:value={yandexKey} type="password" placeholder={t("storedSecret")} />
+                <button class="primary" on:click={() => saveKey("yandex", yandexKey)} disabled={!yandexKey.trim()}>{t("keySave")}</button>
                 <button on:click={() => clearKey("yandex")} title={t("clearField")} aria-label={t("clearField")}><Trash2 size={15} /></button>
               </div>
               {#if keyStateHint(snapshot.hasYandexKey)}
@@ -2083,7 +2278,8 @@
             <label>
               <span>{t("localBearer")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "localBearer")} on:mouseenter={() => showHelp("localBearer")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "localBearer"}<span class="help-popover">{help("localBearer")}</span>{/if}</button></span>
               <div class="inline">
-                <input bind:value={localKey} type="password" placeholder={t("optionalLocalServer")} on:input={() => scheduleKeySave("openai-compatible", localKey)} />
+                <input bind:value={localKey} type="password" placeholder={t("optionalLocalServer")} />
+                <button class="primary" on:click={() => saveKey("openai-compatible", localKey)} disabled={!localKey.trim()}>{t("keySave")}</button>
                 <button on:click={() => clearKey("openai-compatible")} title={t("clearField")} aria-label={t("clearField")}><Trash2 size={15} /></button>
               </div>
               {#if keyStateHint(snapshot.hasLocalKey)}
@@ -2516,6 +2712,20 @@
     background: var(--surface-soft);
   }
 
+  .combo-group {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    padding: 2px 4px 0;
+  }
+
+  .combo-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 4px 0;
+  }
+
   input,
   select {
     height: 30px;
@@ -2605,6 +2815,34 @@
     padding: 10px 0 0;
     display: grid;
     gap: 8px;
+  }
+
+  .footer-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .footer-bar .inline-note {
+    margin: 0;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .muted-note {
+    color: var(--muted);
+  }
+
+  .footer-toggle :global(svg) {
+    transition: transform 0.15s ease;
+  }
+
+  .footer-toggle.open :global(svg) {
+    transform: rotate(180deg);
   }
 
   .accel-banner {
