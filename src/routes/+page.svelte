@@ -235,6 +235,10 @@
   let runtimeLogText = "";
   let runtimeLogLoading = false;
   let showAccelInfo = false;
+  let gpuBusy = false;
+  let gpuProgress = 0;
+  let gpuMessage = "";
+  let gpuError = "";
 
   type SecretProvider = "deepl" | "google" | "yandex" | "openai-compatible";
 
@@ -609,6 +613,13 @@
       accelInfoBody: "Right now translation always uses your processor. That is reliable and works on every computer — it is just a bit slower.",
       accelInfoBodyGpu: "Your computer has a graphics card ({gpu}). Graphics cards can translate much faster.",
       accelInfoSoon: "A one-click \"Speed it up\" button is on the way in a future update. It will download and switch everything on for you automatically. For now you do not need to do anything — translation keeps working.",
+      accelInfoSize: "This is a one-time download of about 4 GB (the graphics runtime plus a faster model). Make sure you are on Wi-Fi. The app will restart by itself when it is ready.",
+      accelInfoAction: "Speed it up",
+      accelCancel: "Maybe later",
+      accelWorking: "Setting up your graphics card…",
+      accelErrorTitle: "Could not turn it on",
+      accelRetry: "Try again",
+      accelDisable: "Switch back to processor",
     },
     ru: {
       translate: "Перевести",
@@ -737,6 +748,13 @@
       accelInfoBody: "Сейчас перевод всегда работает на процессоре. Это надёжно и работает на любом компьютере — просто чуть медленнее.",
       accelInfoBodyGpu: "У твоего компьютера есть видеокарта ({gpu}). Видеокарты умеют переводить намного быстрее.",
       accelInfoSoon: "Кнопка «Ускорить» в одно нажатие скоро появится в обновлении. Она сама всё скачает и включит. Пока делать ничего не нужно — перевод и так работает.",
+      accelInfoSize: "Это разовая загрузка примерно на 4 ГБ (графический рантайм и более быстрая модель). Лучше быть на Wi-Fi. Когда всё будет готово, приложение перезапустится само.",
+      accelInfoAction: "Ускорить",
+      accelCancel: "Не сейчас",
+      accelWorking: "Настраиваю видеокарту…",
+      accelErrorTitle: "Не получилось включить",
+      accelRetry: "Попробовать снова",
+      accelDisable: "Вернуться на процессор",
     },
     sk: {
       translate: "Preložiť",
@@ -865,6 +883,13 @@
       accelInfoBody: "Preklad teraz vždy používa procesor. Je to spoľahlivé a funguje na každom počítači — len o čosi pomalšie.",
       accelInfoBodyGpu: "Tvoj počítač má grafickú kartu ({gpu}). Grafické karty vedia prekladať oveľa rýchlejšie.",
       accelInfoSoon: "Tlačidlo „Zrýchliť“ na jedno kliknutie čoskoro pribudne v aktualizácii. Všetko stiahne a zapne za teba. Zatiaľ nemusíš robiť nič — preklad funguje ďalej.",
+      accelInfoSize: "Je to jednorazové stiahnutie približne 4 GB (grafický runtime a rýchlejší model). Najlepšie cez Wi-Fi. Keď bude všetko pripravené, aplikácia sa sama reštartuje.",
+      accelInfoAction: "Zrýchliť",
+      accelCancel: "Možno neskôr",
+      accelWorking: "Nastavujem grafickú kartu…",
+      accelErrorTitle: "Nepodarilo sa zapnúť",
+      accelRetry: "Skúsiť znova",
+      accelDisable: "Späť na procesor",
     },
   } as const;
 
@@ -905,6 +930,11 @@
       await consumePending();
       unlisten = await listen("waylate-pending", consumePending);
       unlistenDownload = await listen<DownloadProgress>("model-download-progress", (event) => {
+        if (event.payload.modelId === "gpu-runtime") {
+          gpuProgress = event.payload.progress;
+          gpuMessage = event.payload.message;
+          return;
+        }
         downloadState = event.payload;
       });
       unlistenTranslation = await listen<TranslationProgress>("translation-progress", (event) => {
@@ -1487,6 +1517,30 @@
     return t(key).replace("{gpu}", accelGpuName());
   }
 
+  // Download the GPU runtime + fp16 model and switch over. The backend restarts the app on
+  // success, so this call never resolves normally — a returned error means it failed first.
+  async function enableGpu() {
+    if (gpuBusy) return;
+    gpuBusy = true;
+    gpuError = "";
+    gpuProgress = 0;
+    gpuMessage = "";
+    try {
+      await invoke("enable_gpu_acceleration");
+    } catch (err) {
+      gpuError = String(err);
+      gpuBusy = false;
+    }
+  }
+
+  async function disableGpu() {
+    try {
+      await invoke("disable_gpu_acceleration");
+    } catch (err) {
+      gpuError = String(err);
+    }
+  }
+
   function applyTheme(theme: string) {
     if (typeof document === "undefined") return;
     document.documentElement.dataset.theme = theme === "dark" ? "dark" : "light";
@@ -1768,6 +1822,7 @@
               <aside class="accel-banner fast">
                 <Zap size={15} />
                 <span class="accel-message">{t("accelOnGpu")}</span>
+                <button type="button" class="accel-cta" on:click={disableGpu}>{t("accelDisable")}</button>
               </aside>
             {:else if accelMode === "cpu-upsell"}
               <aside class="accel-banner">
@@ -2073,19 +2128,35 @@
   <div
     class="accel-modal-backdrop"
     role="presentation"
-    on:click={(event) => { if (event.target === event.currentTarget) showAccelInfo = false; }}
+    on:click={(event) => { if (!gpuBusy && event.target === event.currentTarget) showAccelInfo = false; }}
   >
     <div class="accel-modal" role="dialog" tabindex="-1" aria-modal="true" aria-label={t("accelInfoTitle")}>
       <div class="accel-modal-head">
         <Zap size={18} />
         <h2>{t("accelInfoTitle")}</h2>
       </div>
-      <p>{t("accelInfoBody")}</p>
-      {#if snapshot?.runtime.gpuVendor === "nvidia" || snapshot?.runtime.gpuVendor === "amd"}
+      {#if gpuBusy}
+        <p>{gpuMessage || t("accelWorking")}</p>
+        <div class="accel-progress"><div class="accel-progress-fill" style={`width: ${Math.round(gpuProgress * 100)}%`}></div></div>
+      {:else if snapshot?.runtime.gpuVendor === "nvidia"}
+        <p>{t("accelInfoBody")}</p>
         <p>{accelText("accelInfoBodyGpu")}</p>
+        <p class="accel-soon">{t("accelInfoSize")}</p>
+        {#if gpuError}
+          <p class="error-note"><strong>{t("accelErrorTitle")}</strong> — {gpuError}</p>
+        {/if}
+        <div class="accel-modal-actions">
+          <button type="button" class="ghost" on:click={() => (showAccelInfo = false)}>{t("accelCancel")}</button>
+          <button type="button" class="primary" on:click={enableGpu}>{gpuError ? t("accelRetry") : t("accelInfoAction")}</button>
+        </div>
+      {:else}
+        <p>{t("accelInfoBody")}</p>
+        {#if snapshot?.runtime.gpuVendor === "amd"}
+          <p>{accelText("accelInfoBodyGpu")}</p>
+        {/if}
+        <p class="accel-soon">{t("accelInfoSoon")}</p>
+        <button type="button" class="primary" on:click={() => (showAccelInfo = false)}>{t("accelClose")}</button>
       {/if}
-      <p class="accel-soon">{t("accelInfoSoon")}</p>
-      <button type="button" class="primary" on:click={() => (showAccelInfo = false)}>{t("accelClose")}</button>
     </div>
   </div>
 {/if}
@@ -2639,6 +2710,40 @@
   .accel-modal .primary {
     align-self: flex-end;
     margin-top: 4px;
+  }
+
+  .accel-modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  .accel-modal-actions .ghost {
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text);
+    border-radius: 8px;
+    padding: 8px 14px;
+    cursor: pointer;
+  }
+
+  .accel-modal-actions .ghost:hover {
+    background: var(--surface-soft);
+  }
+
+  .accel-progress {
+    height: 8px;
+    border-radius: 999px;
+    background: var(--surface-soft);
+    overflow: hidden;
+  }
+
+  .accel-progress-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--accent, #3b82f6);
+    transition: width 0.2s ease;
   }
 
   .range-row {

@@ -2,6 +2,7 @@ mod autostart;
 mod clipboard;
 mod config;
 mod engines;
+mod gpu_runtime;
 mod history;
 mod models;
 mod runtime;
@@ -461,6 +462,82 @@ async fn download_catalog_model(
     }
 
     result
+}
+
+/// Synthetic model id the GPU runtime download reports progress under, so the existing
+/// `model-download-progress` listener and progress bar can render it without new plumbing.
+const GPU_DOWNLOAD_ID: &str = "gpu-runtime";
+
+/// Download the self-contained CUDA onnxruntime bundle and the fp16 weights, flip the GPU
+/// flag, then restart so ORT loads the GPU library before any translation call.
+#[tauri::command]
+async fn enable_gpu_acceleration(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let paths = state.paths.clone();
+    let app_for_worker = app.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        // The runtime is the bulk (~2.5 GB); give it the first 80% of the bar.
+        emit_download(
+            &app_for_worker,
+            GPU_DOWNLOAD_ID,
+            "downloading",
+            "Preparing GPU runtime",
+            0.0,
+            0,
+            None,
+        );
+        gpu_runtime::download_gpu_runtime(&paths, &mut |frac, msg| {
+            emit_download(
+                &app_for_worker,
+                GPU_DOWNLOAD_ID,
+                "downloading",
+                msg,
+                (frac * 0.8).clamp(0.0, 0.8),
+                0,
+                None,
+            );
+        })?;
+        gpu_runtime::download_fp16_model(&paths, &mut |frac, msg| {
+            emit_download(
+                &app_for_worker,
+                GPU_DOWNLOAD_ID,
+                "downloading",
+                msg,
+                (0.8 + frac * 0.18).clamp(0.8, 0.98),
+                0,
+                None,
+            );
+        })?;
+
+        let mut config = config::load(&paths)?;
+        config.gpu_enabled = true;
+        config::save(&paths, &config)?;
+        emit_download(
+            &app_for_worker,
+            GPU_DOWNLOAD_ID,
+            "done",
+            "Restarting on GPU",
+            1.0,
+            0,
+            None,
+        );
+        Ok(())
+    })
+    .await
+    .map_err(|err| err.to_string())??;
+
+    // ORT resolves its library once per process, so the GPU runtime only takes effect after a
+    // restart (which also re-execs with the bundle on LD_LIBRARY_PATH). `restart` diverges.
+    app.restart()
+}
+
+/// Turn GPU translation off and restart back onto the bundled CPU runtime. The downloaded
+/// GPU runtime and fp16 weights are left on disk so re-enabling is instant.
+#[tauri::command]
+fn disable_gpu_acceleration(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let mut config = config::load(&state.paths)?;
+    config.gpu_enabled = false;
+    config::save(&state.paths, &config)?;
+    app.restart()
 }
 
 async fn install_spec_model(
@@ -1702,7 +1779,9 @@ pub fn run() {
             reveal_path,
             read_runtime_log,
             download_catalog_model,
-            cancel_model_download
+            cancel_model_download,
+            enable_gpu_acceleration,
+            disable_gpu_acceleration
         ])
         .run(tauri::generate_context!())
         .expect("error while running Waylate");

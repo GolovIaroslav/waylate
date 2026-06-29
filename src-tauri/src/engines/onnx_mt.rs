@@ -192,41 +192,67 @@ struct KvCache {
 }
 
 impl LoadedOnnxModel {
+    // INT8 weights run on the CPU EP at opt=All (the proven fast path); CPU-first ordering.
+    const INT8_ENCODER: &[&str] = &[
+        "encoder_model_quantized.onnx",
+        "encoder_model_int8.onnx",
+        "encoder_model.onnx",
+    ];
+    const INT8_DECODER: &[&str] = &[
+        "decoder_model_merged_quantized.onnx",
+        "decoder_model_merged_int8.onnx",
+        "decoder_model_merged.onnx",
+    ];
+    // fp16 weights run on the CUDA EP (tensor cores). They cannot load on the CPU EP at
+    // opt=All, so the CPU fallback below switches back to INT8, not just to the CPU device.
+    const FP16_ENCODER: &[&str] = &[
+        "encoder_model_fp16.onnx",
+        "encoder_model_quantized.onnx",
+        "encoder_model_int8.onnx",
+        "encoder_model.onnx",
+    ];
+    const FP16_DECODER: &[&str] = &[
+        "decoder_model_merged_fp16.onnx",
+        "decoder_model_merged_quantized.onnx",
+        "decoder_model_merged_int8.onnx",
+        "decoder_model_merged.onnx",
+    ];
+
     fn load(entry: &ModelCatalogEntry, model_dir: &Path) -> Result<Self, String> {
-        // On the GPU runtime prefer the fp16 weights (tensor cores); on CPU prefer INT8.
-        // The other ordering still works as a fallback when only one set is present.
-        let (encoder_candidates, decoder_candidates): (&[&str], &[&str]) =
-            if GPU_ACTIVE.load(Ordering::Relaxed) {
-                (
-                    &[
-                        "encoder_model_fp16.onnx",
-                        "encoder_model_quantized.onnx",
-                        "encoder_model_int8.onnx",
-                        "encoder_model.onnx",
-                    ],
-                    &[
-                        "decoder_model_merged_fp16.onnx",
-                        "decoder_model_merged_quantized.onnx",
-                        "decoder_model_merged_int8.onnx",
-                        "decoder_model_merged.onnx",
-                    ],
-                )
-            } else {
-                (
-                    &[
-                        "encoder_model_quantized.onnx",
-                        "encoder_model_int8.onnx",
-                        "encoder_model_fp16.onnx",
-                        "encoder_model.onnx",
-                    ],
-                    &[
-                        "decoder_model_merged_quantized.onnx",
-                        "decoder_model_merged_int8.onnx",
-                        "decoder_model_merged_fp16.onnx",
-                        "decoder_model_merged.onnx",
-                    ],
-                )
-            };
+        if GPU_ACTIVE.load(Ordering::Relaxed) {
+            match Self::load_variant(
+                entry,
+                model_dir,
+                Self::FP16_ENCODER,
+                Self::FP16_DECODER,
+                false,
+            ) {
+                Ok(model) => return Ok(model),
+                // Usually CUDA out-of-memory on a small GPU. Rather than break translation,
+                // fall back to INT8 forced onto the CPU EP (the always-works path).
+                Err(err) => eprintln!(
+                    "[onnx] GPU model load failed ({err}); falling back to CPU INT8 \
+                     (free VRAM or disable GPU to silence this)"
+                ),
+            }
+            return Self::load_variant(
+                entry,
+                model_dir,
+                Self::INT8_ENCODER,
+                Self::INT8_DECODER,
+                true,
+            );
+        }
+        Self::load_variant(entry, model_dir, Self::INT8_ENCODER, Self::INT8_DECODER, false)
+    }
+
+    fn load_variant(
+        entry: &ModelCatalogEntry,
+        model_dir: &Path,
+        encoder_candidates: &[&str],
+        decoder_candidates: &[&str],
+        force_cpu: bool,
+    ) -> Result<Self, String> {
         let encoder_path = required_file(model_dir, encoder_candidates)?;
         let decoder_path = required_file(model_dir, decoder_candidates)?;
         let tokenizer_path = required_file(model_dir, &["tokenizer.json"])?;
@@ -235,9 +261,9 @@ impl LoadedOnnxModel {
             .map_err(|err| format!("Could not load tokenizer for {}: {err}", entry.name))?;
 
         let intra = intra_op_threads();
-        let (encoder, device) = load_session(&encoder_path, intra)
+        let (encoder, device) = load_session(&encoder_path, intra, force_cpu)
             .map_err(|err| format!("Could not load encoder model: {err}"))?;
-        let (decoder, _) = load_session(&decoder_path, intra)
+        let (decoder, _) = load_session(&decoder_path, intra, force_cpu)
             .map_err(|err| format!("Could not load decoder model: {err}"))?;
 
         let eos_token_id = token_id(&tokenizer, "</s>")?;
@@ -657,20 +683,23 @@ fn intra_op_threads() -> usize {
     (logical / 4).clamp(2, 8)
 }
 
-fn load_session(path: &Path, intra: usize) -> Result<(Session, String), String> {
+fn load_session(path: &Path, intra: usize, force_cpu: bool) -> Result<(Session, String), String> {
     // Only attempt the GPU execution provider that matches the detected hardware.
     // Blindly trying CUDA then ROCm on every load spams the log with two guaranteed
-    // failures on the common CPU-only build; route by vendor instead.
-    match crate::runtime::detect_gpu().0.as_deref() {
-        Some("nvidia") => match load_session_cuda(path, intra) {
-            Ok(session) => return Ok((session, "cuda".into())),
-            Err(err) => eprintln!("[onnx] CUDA EP unavailable, using CPU: {err}"),
-        },
-        Some("amd") => match load_session_rocm(path, intra) {
-            Ok(session) => return Ok((session, "rocm".into())),
-            Err(err) => eprintln!("[onnx] ROCm EP unavailable, using CPU: {err}"),
-        },
-        _ => {}
+    // failures on the common CPU-only build; route by vendor instead. `force_cpu` skips the
+    // GPU EP entirely (the GPU-load fallback, e.g. after CUDA OOM) so INT8 loads on the CPU EP.
+    if !force_cpu {
+        match crate::runtime::detect_gpu().0.as_deref() {
+            Some("nvidia") => match load_session_cuda(path, intra) {
+                Ok(session) => return Ok((session, "cuda".into())),
+                Err(err) => eprintln!("[onnx] CUDA EP unavailable, using CPU: {err}"),
+            },
+            Some("amd") => match load_session_rocm(path, intra) {
+                Ok(session) => return Ok((session, "rocm".into())),
+                Err(err) => eprintln!("[onnx] ROCm EP unavailable, using CPU: {err}"),
+            },
+            _ => {}
+        }
     }
     let session = load_session_cpu(path, intra).map_err(|err| err.to_string())?;
     Ok((session, "cpu".into()))
