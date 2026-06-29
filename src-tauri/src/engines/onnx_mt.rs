@@ -1,5 +1,5 @@
 use crate::{
-    config::AppPaths,
+    config::{AppConfig, AppPaths},
     models::{EngineKind, ModelCatalogEntry},
 };
 use ort::{
@@ -46,6 +46,56 @@ pub fn unload(profile_id: &str) {
             cache.remove(profile_id);
         }
     }
+}
+
+/// Private directory holding the downloaded GPU onnxruntime (libonnxruntime.so + CUDA
+/// provider libs). Kept out of the system so it never clashes with the OS onnxruntime.
+pub fn gpu_runtime_dir(paths: &AppPaths) -> PathBuf {
+    paths.data_dir.join("runtime").join("onnxruntime-cuda")
+}
+
+/// Point ORT at a concrete onnxruntime shared library via `ORT_DYLIB_PATH`, before any
+/// ORT call is made (model preload). With the `load-dynamic` feature ort resolves its
+/// library exactly once per process, so this must run first and switching CPU<->GPU
+/// requires an app restart.
+///
+/// Priority: explicit env override (dev) → GPU runtime when opted in and present →
+/// bundled CPU lib next to the binary → system-installed lib (dev fallback). Returns the
+/// chosen path for logging, or None when no library was found.
+pub fn configure_ort_dylib(paths: &AppPaths, config: &AppConfig) -> Option<String> {
+    // Respect an explicit override (debugging / unusual setups) without touching it.
+    if let Ok(existing) = std::env::var("ORT_DYLIB_PATH") {
+        if !existing.trim().is_empty() {
+            return Some(existing);
+        }
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // GPU runtime — only when the user opted in and it is actually installed.
+    if config.gpu_enabled {
+        candidates.push(gpu_runtime_dir(paths).join("libonnxruntime.so"));
+    }
+
+    // Bundled CPU library shipped next to the executable (deb/rpm/AppImage).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("libonnxruntime.so"));
+        }
+    }
+    // Managed CPU copy, then the system library (dev fallback).
+    candidates.push(
+        paths
+            .data_dir
+            .join("runtime")
+            .join("onnxruntime-cpu")
+            .join("libonnxruntime.so"),
+    );
+    candidates.push(PathBuf::from("/usr/lib/libonnxruntime.so"));
+
+    let chosen = candidates.into_iter().find(|p| p.is_file())?;
+    unsafe { std::env::set_var("ORT_DYLIB_PATH", &chosen) };
+    Some(chosen.display().to_string())
 }
 
 pub fn translate_with_progress(
@@ -637,6 +687,9 @@ mod tests {
         }
 
         let paths = AppPaths::new().expect("app paths should resolve");
+        // Exercise the real library-resolution path the app uses on startup so the
+        // benchmark loads through ORT_DYLIB_PATH exactly like production does.
+        configure_ort_dylib(&paths, &AppConfig::default());
         let entry = crate::models::model_catalog()
             .into_iter()
             .find(|entry| entry.id == "nllb-200-distilled-600m-onnx")
@@ -658,7 +711,8 @@ mod tests {
         let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
         assert!(!translated.trim().is_empty());
         eprintln!(
-            "[bench] intra={} total={:.0}ms words~{} translation={}",
+            "[bench] device={} intra={} total={:.0}ms words~{} translation={}",
+            model.device,
             intra_op_threads(),
             total_ms,
             token_count,

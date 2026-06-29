@@ -1594,6 +1594,20 @@ pub fn run() {
     .min(8);
     unsafe { std::env::set_var("OMP_NUM_THREADS", ort_threads.to_string()) };
 
+    // Point ORT at a concrete onnxruntime library before any ORT call (model preload).
+    // With the load-dynamic feature the library is resolved once per process, so this
+    // must run first; switching CPU<->GPU therefore needs a restart.
+    if let Ok(paths) = AppPaths::new() {
+        if let Ok(config) = config::load(&paths) {
+            match engines::onnx_mt::configure_ort_dylib(&paths, &config) {
+                Some(path) => eprintln!("[onnx] runtime library: {path}"),
+                None => eprintln!(
+                    "[onnx] no onnxruntime library found — ONNX translation will be unavailable"
+                ),
+            }
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             handle_args(app, &args);

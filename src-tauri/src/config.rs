@@ -35,6 +35,10 @@ pub struct AppConfig {
     pub yandex_folder_id: String,
     pub ui_language: String,
     pub theme: String,
+    /// User opted into GPU translation. When true and the GPU onnxruntime is installed,
+    /// the app loads the CUDA/ROCm runtime instead of the bundled CPU one. ORT loads its
+    /// library once per process, so toggling this requires an app restart.
+    pub gpu_enabled: bool,
     pub installed_models: HashMap<String, InstalledModelMetadata>,
 }
 
@@ -60,6 +64,7 @@ impl Default for AppConfig {
             yandex_folder_id: String::new(),
             ui_language: "en".into(),
             theme: "light".into(),
+            gpu_enabled: false,
             installed_models: HashMap::new(),
         }
     }
