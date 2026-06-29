@@ -1583,7 +1583,43 @@ fn spawn_runtime_housekeeper(paths: AppPaths, runtime: Arc<RuntimeManager>) {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// When GPU translation is enabled, the downloaded onnxruntime needs its sibling libraries
+/// (CUDA runtime, cuDNN, abseil, ...) on the loader search path. glibc captures
+/// LD_LIBRARY_PATH at process start and ignores later setenv, so we re-exec ourselves once
+/// with it set before any library is dlopened. `exec` replaces the image (same PID), so the
+/// single-instance lock is unaffected. A guard env var prevents an infinite loop.
+fn maybe_reexec_for_gpu() {
+    use std::os::unix::process::CommandExt;
+    if std::env::var_os("WAYLATE_GPU_REEXEC").is_some() {
+        return;
+    }
+    let Ok(paths) = AppPaths::new() else { return };
+    let Ok(config) = config::load(&paths) else { return };
+    if !config.gpu_enabled {
+        return;
+    }
+    let runtime_dir = engines::onnx_mt::gpu_runtime_dir(&paths);
+    if !runtime_dir.join("libonnxruntime.so").is_file() {
+        return;
+    }
+    let dir = runtime_dir.display().to_string();
+    let new_ld = match std::env::var("LD_LIBRARY_PATH") {
+        Ok(existing) if !existing.trim().is_empty() => format!("{dir}:{existing}"),
+        _ => dir,
+    };
+    let Ok(exe) = std::env::current_exe() else { return };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let err = std::process::Command::new(exe)
+        .args(args)
+        .env("LD_LIBRARY_PATH", new_ld)
+        .env("WAYLATE_GPU_REEXEC", "1")
+        .exec();
+    eprintln!("[onnx] GPU re-exec failed ({err}); continuing on CPU runtime");
+}
+
 pub fn run() {
+    maybe_reexec_for_gpu();
+
     // ORT prebuilt binaries use OpenMP, which ignores SessionBuilder::with_intra_threads.
     // Setting OMP_NUM_THREADS here ensures the actual kernel thread count matches physical cores.
     let ort_threads = (std::thread::available_parallelism()

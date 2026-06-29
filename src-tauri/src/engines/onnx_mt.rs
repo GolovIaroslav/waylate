@@ -10,11 +10,19 @@ use ort::{
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
 };
 use tokenizers::Tokenizer;
 
 static MODEL_CACHE: OnceLock<Mutex<HashMap<String, LoadedOnnxModel>>> = OnceLock::new();
+
+/// Set once at startup by `configure_ort_dylib` when the GPU onnxruntime is the chosen
+/// library. The model loader reads it to prefer the fp16 weights (which the CUDA EP runs
+/// on tensor cores) over the INT8 weights used on CPU.
+static GPU_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn active_device(profile_id: &str) -> Option<String> {
     MODEL_CACHE
@@ -94,6 +102,10 @@ pub fn configure_ort_dylib(paths: &AppPaths, config: &AppConfig) -> Option<Strin
     candidates.push(PathBuf::from("/usr/lib/libonnxruntime.so"));
 
     let chosen = candidates.into_iter().find(|p| p.is_file())?;
+    // Remember whether we are running on the GPU runtime so the model loader can pick the
+    // matching (fp16) weights. The GPU library lives under gpu_runtime_dir.
+    let on_gpu = config.gpu_enabled && chosen.starts_with(gpu_runtime_dir(paths));
+    GPU_ACTIVE.store(on_gpu, Ordering::Relaxed);
     unsafe { std::env::set_var("ORT_DYLIB_PATH", &chosen) };
     Some(chosen.display().to_string())
 }
@@ -181,24 +193,42 @@ struct KvCache {
 
 impl LoadedOnnxModel {
     fn load(entry: &ModelCatalogEntry, model_dir: &Path) -> Result<Self, String> {
-        let encoder_path = required_file(
-            model_dir,
-            &[
-                "encoder_model_quantized.onnx",
-                "encoder_model_int8.onnx",
-                "encoder_model_fp16.onnx",
-                "encoder_model.onnx",
-            ],
-        )?;
-        let decoder_path = required_file(
-            model_dir,
-            &[
-                "decoder_model_merged_quantized.onnx",
-                "decoder_model_merged_int8.onnx",
-                "decoder_model_merged_fp16.onnx",
-                "decoder_model_merged.onnx",
-            ],
-        )?;
+        // On the GPU runtime prefer the fp16 weights (tensor cores); on CPU prefer INT8.
+        // The other ordering still works as a fallback when only one set is present.
+        let (encoder_candidates, decoder_candidates): (&[&str], &[&str]) =
+            if GPU_ACTIVE.load(Ordering::Relaxed) {
+                (
+                    &[
+                        "encoder_model_fp16.onnx",
+                        "encoder_model_quantized.onnx",
+                        "encoder_model_int8.onnx",
+                        "encoder_model.onnx",
+                    ],
+                    &[
+                        "decoder_model_merged_fp16.onnx",
+                        "decoder_model_merged_quantized.onnx",
+                        "decoder_model_merged_int8.onnx",
+                        "decoder_model_merged.onnx",
+                    ],
+                )
+            } else {
+                (
+                    &[
+                        "encoder_model_quantized.onnx",
+                        "encoder_model_int8.onnx",
+                        "encoder_model_fp16.onnx",
+                        "encoder_model.onnx",
+                    ],
+                    &[
+                        "decoder_model_merged_quantized.onnx",
+                        "decoder_model_merged_int8.onnx",
+                        "decoder_model_merged_fp16.onnx",
+                        "decoder_model_merged.onnx",
+                    ],
+                )
+            };
+        let encoder_path = required_file(model_dir, encoder_candidates)?;
+        let decoder_path = required_file(model_dir, decoder_candidates)?;
         let tokenizer_path = required_file(model_dir, &["tokenizer.json"])?;
 
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
