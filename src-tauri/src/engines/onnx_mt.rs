@@ -186,6 +186,7 @@ impl LoadedOnnxModel {
             &[
                 "encoder_model_quantized.onnx",
                 "encoder_model_int8.onnx",
+                "encoder_model_fp16.onnx",
                 "encoder_model.onnx",
             ],
         )?;
@@ -194,6 +195,7 @@ impl LoadedOnnxModel {
             &[
                 "decoder_model_merged_quantized.onnx",
                 "decoder_model_merged_int8.onnx",
+                "decoder_model_merged_fp16.onnx",
                 "decoder_model_merged.onnx",
             ],
         )?;
@@ -699,6 +701,47 @@ mod tests {
 
         // A fixed, sentence-length input gives a deterministic token count so timing
         // across thread/mem-pattern settings is comparable run to run.
+        let source = "The weather is nice today and we are going to the park to play.";
+        let mut token_count = 0_usize;
+        let t0 = std::time::Instant::now();
+        let translated = model
+            .translate(source, "eng_Latn", "rus_Cyrl", &mut |partial| {
+                token_count = partial.split_whitespace().count();
+                Ok(())
+            })
+            .expect("translation should succeed");
+        let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        assert!(!translated.trim().is_empty());
+        eprintln!(
+            "[bench] device={} intra={} total={:.0}ms words~{} translation={}",
+            model.device,
+            intra_op_threads(),
+            total_ms,
+            token_count,
+            translated
+        );
+    }
+
+    /// GPU/fp16 smoke benchmark. Loads the fp16 NLLB export from WAYLATE_ONNX_FP16_DIR
+    /// (which must hold encoder_model_fp16.onnx, decoder_model_merged_fp16.onnx,
+    /// tokenizer.json) and reports the device it ran on. Point ORT_DYLIB_PATH at the GPU
+    /// onnxruntime and set LD_LIBRARY_PATH for CUDA + cuDNN to exercise the CUDA EP.
+    #[test]
+    fn local_nllb_fp16_smoke_when_enabled() {
+        if std::env::var("WAYLATE_ONNX_SMOKE").ok().as_deref() != Some("1") {
+            return;
+        }
+        let Ok(dir) = std::env::var("WAYLATE_ONNX_FP16_DIR") else {
+            eprintln!("[onnx] WAYLATE_ONNX_FP16_DIR not set — skipping fp16 smoke");
+            return;
+        };
+        let model_dir = std::path::PathBuf::from(dir);
+        let entry = crate::models::model_catalog()
+            .into_iter()
+            .find(|entry| entry.id == "nllb-200-distilled-600m-onnx")
+            .expect("nllb entry exists");
+        let mut model = LoadedOnnxModel::load(&entry, &model_dir).expect("fp16 model should load");
+
         let source = "The weather is nice today and we are going to the park to play.";
         let mut token_count = 0_usize;
         let t0 = std::time::Instant::now();
