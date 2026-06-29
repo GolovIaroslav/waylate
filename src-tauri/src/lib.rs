@@ -1837,7 +1837,10 @@ fn spawn_runtime_housekeeper(paths: AppPaths, runtime: Arc<RuntimeManager>) {
 /// single-instance lock is unaffected. A guard env var prevents an infinite loop.
 fn maybe_reexec_for_gpu() {
     use std::os::unix::process::CommandExt;
-    if std::env::var_os("WAYLATE_GPU_REEXEC").is_some() {
+    // Single source of truth for the guard env var name: a typo across the two uses below
+    // would cause an infinite re-exec loop.
+    const GPU_REEXEC_ENV: &str = "WAYLATE_GPU_REEXEC";
+    if std::env::var_os(GPU_REEXEC_ENV).is_some() {
         return;
     }
     let Ok(paths) = AppPaths::new() else { return };
@@ -1859,7 +1862,7 @@ fn maybe_reexec_for_gpu() {
     let err = std::process::Command::new(exe)
         .args(args)
         .env("LD_LIBRARY_PATH", new_ld)
-        .env("WAYLATE_GPU_REEXEC", "1")
+        .env(GPU_REEXEC_ENV, "1")
         .exec();
     eprintln!("[onnx] GPU re-exec failed ({err}); continuing on CPU runtime");
 }
