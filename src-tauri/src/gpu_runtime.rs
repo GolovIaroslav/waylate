@@ -75,10 +75,18 @@ pub fn download_gpu_runtime(
     }
 
     let dest = gpu_runtime_dir(paths);
-    fs::create_dir_all(&dest).map_err(|err| format!("Could not create GPU runtime dir: {err}"))?;
-    let staging = dest.join(".staging");
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Could not create GPU runtime dir: {err}"))?;
+    }
+    // Assemble into a sibling staging dir, then atomically rename the flattened libs into
+    // place. This keeps `is_installed()` (which only checks `dest`) false until the bundle is
+    // complete. A leftover staging dir means a previous run was interrupted — wipe it.
+    let mut staging = dest.clone();
+    staging.set_extension("staging");
     let _ = fs::remove_dir_all(&staging);
-    fs::create_dir_all(&staging).map_err(|err| err.to_string())?;
+    let libs_out = staging.join("lib");
+    fs::create_dir_all(&libs_out).map_err(|err| err.to_string())?;
 
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60 * 30))
@@ -111,20 +119,26 @@ pub fn download_gpu_runtime(
         progress(base + span * 0.9, &format!("Installing {label}"));
         let extract_dir = staging.join(format!("x{index}"));
         extract_archive(&archive_path, &extract_dir)?;
-        flatten_shared_libs(&extract_dir, &dest)?;
+        flatten_shared_libs(&extract_dir, &libs_out)?;
         let _ = fs::remove_file(&archive_path);
         let _ = fs::remove_dir_all(&extract_dir);
     }
 
-    let _ = fs::remove_dir_all(&staging);
-
-    if !dest.join("libonnxruntime.so").is_file() {
+    if !libs_out.join("libonnxruntime.so").is_file() {
+        let _ = fs::remove_dir_all(&staging);
         return Err(
             "GPU runtime assembled but libonnxruntime.so is missing — the onnxruntime-cuda \
              package layout may have changed."
                 .into(),
         );
     }
+
+    // Swap the fully-assembled libs into the final location, then drop the staging dir.
+    let _ = fs::remove_dir_all(&dest);
+    fs::rename(&libs_out, &dest)
+        .map_err(|err| format!("Could not finalize GPU runtime dir: {err}"))?;
+    let _ = fs::remove_dir_all(&staging);
+
     progress(1.0, "GPU runtime ready");
     Ok(())
 }
@@ -269,6 +283,16 @@ fn download_file(
             }
         }
     }
+    // Reject a stream the server closed early — otherwise a truncated file would be renamed
+    // into place and later fed to ORT / tar as if it were complete.
+    if let Some(total) = total {
+        if downloaded != total {
+            let _ = fs::remove_file(dest);
+            return Err(format!(
+                "Download of {url} was incomplete ({downloaded} of {total} bytes) — please retry"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -293,6 +317,143 @@ fn extract_archive(archive: &Path, into: &Path) -> Result<(), String> {
         .map_err(|err| format!("Could not run tar to extract {name}: {err}"))?;
     if !status.success() {
         return Err(format!("tar failed to extract {name}"));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Vulkan llama-server (AMD / Intel GPU)
+// ---------------------------------------------------------------------------
+
+/// Pinned Vulkan-enabled llama-server release — keep in sync with LLAMA_SERVER_RELEASE
+/// in runtime.rs.
+const VULKAN_LLAMA_RELEASE: &str = "b8987";
+const VULKAN_LLAMA_URL: &str =
+    "https://github.com/ggml-org/llama.cpp/releases/download/b8987/llama-b8987-bin-ubuntu-vulkan-x64.tar.gz";
+
+/// Path where the Vulkan llama-server binary is stored. Libs land in the parent dir
+/// (`<data_dir>/runtime/vulkan/`), separate from the CPU binary's sibling libs.
+pub fn vulkan_binary_path(paths: &AppPaths) -> std::path::PathBuf {
+    paths
+        .data_dir
+        .join("runtime")
+        .join("vulkan")
+        .join(format!("llama-vulkan-{VULKAN_LLAMA_RELEASE}"))
+}
+
+/// True when the Vulkan binary and its companion libs are present on disk.
+pub fn is_vulkan_installed(paths: &AppPaths) -> bool {
+    let binary = vulkan_binary_path(paths);
+    if !binary.is_file() {
+        return false;
+    }
+    // Same companion libs as the CPU build; Vulkan backend is statically linked in or
+    // provided via the system libvulkan.so.1 that comes with mesa/amdvlk/intel drivers.
+    let dir = binary.parent().unwrap();
+    ["libllama.so", "libllama-common.so.0", "libggml.so.0"]
+        .iter()
+        .all(|name| {
+            let p = dir.join(name);
+            std::fs::symlink_metadata(&p)
+                .map(|m| m.file_type().is_symlink() || m.len() > 0)
+                .unwrap_or(false)
+        })
+}
+
+/// Download and extract the Vulkan llama-server binary. `progress` reports `0.0..=1.0`.
+pub fn download_vulkan_runtime(
+    paths: &AppPaths,
+    progress: &mut dyn FnMut(f64, &str),
+) -> Result<(), String> {
+    if is_vulkan_installed(paths) {
+        progress(1.0, "Vulkan runtime ready");
+        return Ok(());
+    }
+
+    let binary = vulkan_binary_path(paths);
+    let dir = binary.parent().unwrap();
+    fs::create_dir_all(dir).map_err(|err| format!("Could not create Vulkan runtime dir: {err}"))?;
+
+    let archive = dir.join(format!("llama-vulkan-{VULKAN_LLAMA_RELEASE}.tar.gz"));
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|err| err.to_string())?;
+
+    progress(0.0, "Downloading Vulkan runtime");
+    download_file(&client, VULKAN_LLAMA_URL, &archive, &mut |frac| {
+        progress(frac * 0.9, "Downloading Vulkan runtime");
+    })?;
+
+    progress(0.9, "Installing Vulkan runtime");
+    extract_vulkan_tar_gz(&archive, &binary)?;
+    let _ = fs::remove_file(&archive);
+
+    // Make the binary executable.
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(&binary)
+        .map_err(|err| err.to_string())?
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&binary, perms).map_err(|err| err.to_string())?;
+
+    if !is_vulkan_installed(paths) {
+        return Err(
+            "Vulkan runtime downloaded but companion libraries are missing — \
+             the llama.cpp release layout may have changed."
+                .into(),
+        );
+    }
+    progress(1.0, "Vulkan runtime ready");
+    Ok(())
+}
+
+fn extract_vulkan_tar_gz(archive: &Path, dest: &Path) -> Result<(), String> {
+    let dir = dest.parent().unwrap_or_else(|| Path::new("."));
+    let file = File::open(archive).map_err(|err| err.to_string())?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut tar = tar::Archive::new(decoder);
+    let mut found = false;
+    for entry in tar
+        .entries()
+        .map_err(|err| format!("Could not read Vulkan tar entries: {err}"))?
+    {
+        let mut entry = entry.map_err(|err| format!("Could not read Vulkan tar entry: {err}"))?;
+        let path = entry.path().map_err(|err| err.to_string())?.into_owned();
+        let Some(filename) = path.file_name().and_then(|v| v.to_str()) else {
+            continue;
+        };
+        if filename == "llama-server" {
+            let mut out = File::create(dest)
+                .map_err(|err| format!("Could not create Vulkan llama-server binary: {err}"))?;
+            std::io::copy(&mut entry, &mut out)
+                .map_err(|err| format!("Could not extract Vulkan llama-server: {err}"))?;
+            found = true;
+            continue;
+        }
+        let is_lib = filename.starts_with("lib") && filename.contains(".so");
+        if !is_lib {
+            continue;
+        }
+        let dest_path = dir.join(filename);
+        let _ = fs::remove_file(&dest_path);
+        if entry.header().entry_type().is_symlink() {
+            let link = entry
+                .link_name()
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| format!("Missing symlink target for {filename}"))?;
+            std::os::unix::fs::symlink(&link, &dest_path)
+                .map_err(|err| format!("Could not create symlink {}: {err}", dest_path.display()))?;
+            continue;
+        }
+        let mut out = File::create(&dest_path)
+            .map_err(|err| format!("Could not create {}: {err}", dest_path.display()))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|err| format!("Could not extract {filename}: {err}"))?;
+    }
+    if !found {
+        return Err("llama-server not found in the Vulkan tar.gz archive.".into());
     }
     Ok(())
 }

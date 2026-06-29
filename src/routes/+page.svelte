@@ -123,6 +123,7 @@
     uiLanguage: string;
     theme: string;
     gpuEnabled: boolean;
+    vulkanGpuEnabled: boolean;
   };
 
   type HistoryEntry = {
@@ -164,6 +165,7 @@
       onnxDevice?: string;
       llamaBinaryFound: boolean;
       llamaCudaReported: boolean;
+      llamaVulkanReported: boolean;
       gpuVendor?: string;
       gpuName?: string;
     };
@@ -266,8 +268,8 @@
   $: uiLang = config?.uiLanguage === "ru" || config?.uiLanguage === "sk" ? config.uiLanguage : "en";
   // Decide which acceleration banner to show on the translate view:
   //   "gpu"        — local translation is actually running on a GPU (success pill)
-  //   "cpu-upsell" — running on CPU but NVIDIA GPU exists → offer to speed up
-  //   "cpu-amd"    — running on CPU and AMD GPU exists → honest "not available yet"
+  //   "cpu-upsell" — running on CPU but NVIDIA GPU exists → offer CUDA speed-up
+  //   "cpu-vulkan" — running on CPU with AMD/Intel GPU → offer Vulkan speed-up
   //   null         — nothing actionable (no model loaded yet, or no usable GPU)
   $: accelMode = computeAccelMode(snapshot, config);
   $: if (config) applyTheme(config.theme);
@@ -630,9 +632,12 @@
       accelInfoBodyGpu: "Your computer has a graphics card ({gpu}). Graphics cards can translate much faster.",
       accelInfoSoon: "A one-click \"Speed it up\" button is on the way in a future update. It will download and switch everything on for you automatically. For now you do not need to do anything — translation keeps working.",
       accelInfoSize: "This is a one-time download of about 4 GB (the graphics runtime plus a faster model). Make sure you are on Wi-Fi. The app will restart by itself when it is ready.",
+      accelVulkanInfoSize: "Downloads ~31 MB Vulkan runtime. If you don't have a GGUF model yet, it also downloads Hy-MT2 1.8B (~1.1 GB). No restart needed.",
+      accelVulkanWorking: "Setting up Vulkan on your graphics card…",
       accelInfoAction: "Speed it up",
       accelCancel: "Maybe later",
       accelWorking: "Setting up your graphics card…",
+      accelNoCancel: "This download can't be cancelled — please let it finish.",
       accelErrorTitle: "Could not turn it on",
       accelRetry: "Try again",
       accelDisable: "Switch back to processor",
@@ -781,9 +786,12 @@
       accelInfoBodyGpu: "У твоего компьютера есть видеокарта ({gpu}). Видеокарты умеют переводить намного быстрее.",
       accelInfoSoon: "Кнопка «Ускорить» в одно нажатие скоро появится в обновлении. Она сама всё скачает и включит. Пока делать ничего не нужно — перевод и так работает.",
       accelInfoSize: "Это разовая загрузка примерно на 4 ГБ (графический рантайм и более быстрая модель). Лучше быть на Wi-Fi. Когда всё будет готово, приложение перезапустится само.",
+      accelVulkanInfoSize: "Скачает ~31 МБ Vulkan-рантайма. Если GGUF-модели ещё нет — также скачает Hy-MT2 1.8B (~1,1 ГБ). Перезапуск не нужен.",
+      accelVulkanWorking: "Настраиваю Vulkan на видеокарте…",
       accelInfoAction: "Ускорить",
       accelCancel: "Не сейчас",
       accelWorking: "Настраиваю видеокарту…",
+      accelNoCancel: "Эту загрузку нельзя отменить — дождитесь завершения.",
       accelErrorTitle: "Не получилось включить",
       accelRetry: "Попробовать снова",
       accelDisable: "Вернуться на процессор",
@@ -932,9 +940,12 @@
       accelInfoBodyGpu: "Tvoj počítač má grafickú kartu ({gpu}). Grafické karty vedia prekladať oveľa rýchlejšie.",
       accelInfoSoon: "Tlačidlo „Zrýchliť“ na jedno kliknutie čoskoro pribudne v aktualizácii. Všetko stiahne a zapne za teba. Zatiaľ nemusíš robiť nič — preklad funguje ďalej.",
       accelInfoSize: "Je to jednorazové stiahnutie približne 4 GB (grafický runtime a rýchlejší model). Najlepšie cez Wi-Fi. Keď bude všetko pripravené, aplikácia sa sama reštartuje.",
+      accelVulkanInfoSize: "Stiahne ~31 MB Vulkan runtime. Ak ešte nemáš GGUF model, stiahne aj Hy-MT2 1.8B (~1,1 GB). Reštart nie je potrebný.",
+      accelVulkanWorking: "Nastavujem Vulkan na grafickej karte…",
       accelInfoAction: "Zrýchliť",
       accelCancel: "Možno neskôr",
       accelWorking: "Nastavujem grafickú kartu…",
+      accelNoCancel: "Toto sťahovanie sa nedá zrušiť — počkajte, kým sa dokončí.",
       accelErrorTitle: "Nepodarilo sa zapnúť",
       accelRetry: "Skúsiť znova",
       accelDisable: "Späť na procesor",
@@ -998,7 +1009,7 @@
       await consumePending();
       unlisten = await listen("waylate-pending", consumePending);
       unlistenDownload = await listen<DownloadProgress>("model-download-progress", (event) => {
-        if (event.payload.modelId === "gpu-runtime") {
+        if (event.payload.modelId === "gpu-runtime" || event.payload.modelId === "vulkan-runtime") {
           gpuProgress = event.payload.progress;
           gpuMessage = event.payload.message;
           return;
@@ -1080,7 +1091,7 @@
       error = t("nothingToTranslate");
       return;
     }
-    if (selectedModel && isLocalProfile(config.modelId) && !isModelInstalled(selectedModel.id)) {
+    if (selectedModel && isLocalProfile(config.modelId) && !isModelInstalled(selectedModel.id) && specModelState(selectedModel.id) !== "installed") {
       error = t("localModelMissingHint");
       return;
     }
@@ -1627,7 +1638,7 @@
   function computeAccelMode(
     current = snapshot,
     currentConfig = config,
-  ): "gpu" | "cpu-upsell" | "cpu-amd" | "gpu-stalled" | null {
+  ): "gpu" | "cpu-upsell" | "cpu-vulkan" | "gpu-stalled" | null {
     if (!current) return null;
     // Prefer the local translator's device; fall back to any active GGUF runtime.
     const device = current.runtime.onnxDevice ?? current.runtime.selectedDevice;
@@ -1637,7 +1648,7 @@
     // instead of showing the same "speed me up" upsell that just restarted into a fallback.
     if (currentConfig?.gpuEnabled && device === "cpu") return "gpu-stalled";
     if (device === "cpu" && vendor === "nvidia") return "cpu-upsell";
-    if (device === "cpu" && vendor === "amd") return "cpu-amd";
+    if (device === "cpu" && (vendor === "amd" || vendor === "intel")) return "cpu-vulkan";
     return null;
   }
 
@@ -1682,6 +1693,34 @@
   async function disableGpu() {
     try {
       await invoke("disable_gpu_acceleration");
+    } catch (err) {
+      gpuError = String(err);
+    }
+  }
+
+  async function enableVulkan() {
+    if (gpuBusy) return;
+    gpuBusy = true;
+    gpuError = "";
+    gpuProgress = 0;
+    gpuMessage = "";
+    gpuReadyRestart = false;
+    try {
+      await invoke("enable_vulkan_acceleration");
+      showAccelInfo = false;
+      // No restart needed — llama-server picks the Vulkan binary on next translation.
+      await refresh();
+    } catch (err) {
+      gpuError = String(err);
+    } finally {
+      gpuBusy = false;
+    }
+  }
+
+  async function disableVulkan() {
+    try {
+      await invoke("disable_vulkan_acceleration");
+      await refresh();
     } catch (err) {
       gpuError = String(err);
     }
@@ -2058,7 +2097,7 @@
                 <aside class="accel-banner fast">
                   <Zap size={15} />
                   <span class="accel-message">{t("accelOnGpu")}</span>
-                  <button type="button" class="accel-cta" on:click={disableGpu}>{t("accelDisable")}</button>
+                  <button type="button" class="accel-cta" on:click={snapshot?.runtime.gpuVendor === "amd" || snapshot?.runtime.gpuVendor === "intel" ? disableVulkan : disableGpu}>{t("accelDisable")}</button>
                 </aside>
               {:else if accelMode === "gpu-stalled"}
                 <aside class="accel-banner">
@@ -2078,10 +2117,14 @@
                   </div>
                   <button type="button" class="accel-cta" on:click={() => (showAccelInfo = true)}>{t("accelLearnMore")}</button>
                 </aside>
-              {:else if accelMode === "cpu-amd"}
+              {:else if accelMode === "cpu-vulkan"}
                 <aside class="accel-banner">
                   <Cpu size={15} />
-                  <span class="accel-message">{accelText("accelOnCpuBodyGpu")} {t("accelAmdNotAvailable")}</span>
+                  <div class="accel-message">
+                    <strong>{t("accelOnCpuTitle")}</strong>
+                    <span>{accelText("accelOnCpuBodyGpu")}</span>
+                  </div>
+                  <button type="button" class="accel-cta" on:click={() => (showAccelInfo = true)}>{t("accelLearnMore")}</button>
                 </aside>
               {/if}
             {/if}
@@ -2399,8 +2442,9 @@
         <h2>{t("accelInfoTitle")}</h2>
       </div>
       {#if gpuBusy}
-        <p>{gpuMessage || t("accelWorking")}</p>
+        <p>{gpuMessage || (snapshot?.runtime.gpuVendor === "amd" || snapshot?.runtime.gpuVendor === "intel" ? t("accelVulkanWorking") : t("accelWorking"))}</p>
         <div class="accel-progress"><div class="accel-progress-fill" style={`width: ${Math.round(gpuProgress * 100)}%`}></div></div>
+        {#if snapshot?.runtime.gpuVendor !== "amd" && snapshot?.runtime.gpuVendor !== "intel"}<p class="accel-soon">{t("accelNoCancel")}</p>{/if}
       {:else if snapshot?.runtime.gpuVendor === "nvidia"}
         <p>{t("accelInfoBody")}</p>
         <p>{accelText("accelInfoBodyGpu")}</p>
@@ -2412,11 +2456,19 @@
           <button type="button" class="ghost" on:click={() => (showAccelInfo = false)}>{t("accelCancel")}</button>
           <button type="button" class="primary" on:click={enableGpu}>{gpuError ? t("accelRetry") : t("accelInfoAction")}</button>
         </div>
+      {:else if snapshot?.runtime.gpuVendor === "amd" || snapshot?.runtime.gpuVendor === "intel"}
+        <p>{t("accelInfoBody")}</p>
+        <p>{accelText("accelInfoBodyGpu")}</p>
+        <p class="accel-soon">{t("accelVulkanInfoSize")}</p>
+        {#if gpuError}
+          <p class="error-note"><strong>{t("accelErrorTitle")}</strong> — {gpuError}</p>
+        {/if}
+        <div class="accel-modal-actions">
+          <button type="button" class="ghost" on:click={() => (showAccelInfo = false)}>{t("accelCancel")}</button>
+          <button type="button" class="primary" on:click={enableVulkan}>{gpuError ? t("accelRetry") : t("accelInfoAction")}</button>
+        </div>
       {:else}
         <p>{t("accelInfoBody")}</p>
-        {#if snapshot?.runtime.gpuVendor === "amd"}
-          <p>{accelText("accelInfoBodyGpu")}</p>
-        {/if}
         <p class="accel-soon">{t("accelInfoSoon")}</p>
         <button type="button" class="primary" on:click={() => (showAccelInfo = false)}>{t("accelClose")}</button>
       {/if}

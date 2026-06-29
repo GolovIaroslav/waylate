@@ -26,6 +26,7 @@ pub struct RuntimeReport {
     pub onnx_device: Option<String>,
     pub llama_binary_found: bool,
     pub llama_cuda_reported: bool,
+    pub llama_vulkan_reported: bool,
     /// Physical GPU vendor detected on the machine: "nvidia" | "amd" | "intel" | None.
     /// Used by the UI to decide whether to offer GPU acceleration.
     pub gpu_vendor: Option<String>,
@@ -90,6 +91,10 @@ impl RuntimeManager {
             .as_ref()
             .map(|binary| llama_reports_cuda(binary))
             .unwrap_or(false);
+        let llama_vulkan_reported = llama_binary
+            .as_ref()
+            .map(|binary| llama_reports_vulkan(binary))
+            .unwrap_or(false);
 
         let mut active_profiles = Vec::new();
         let mut selected_model_loaded = false;
@@ -126,6 +131,7 @@ impl RuntimeManager {
             onnx_device,
             llama_binary_found: llama_binary.is_some(),
             llama_cuda_reported,
+            llama_vulkan_reported,
             gpu_vendor,
             gpu_name,
         }
@@ -275,6 +281,8 @@ impl RuntimeManager {
         wait_for_http_health(&mut child, &endpoint, Duration::from_secs(60), &log_path)?;
         let device = if llama_reports_cuda(&binary) {
             "cuda".to_string()
+        } else if llama_reports_vulkan(&binary) {
+            "vulkan".to_string()
         } else {
             "cpu".to_string()
         };
@@ -563,6 +571,25 @@ fn llama_reports_cuda(binary: &str) -> bool {
     false
 }
 
+fn llama_reports_vulkan(binary: &str) -> bool {
+    for args in [&["--version"][..], &["--help"][..]] {
+        let output = match Command::new(binary).args(args).output() {
+            Ok(output) => output,
+            Err(_) => continue,
+        };
+        let text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .to_lowercase();
+        if text.contains("vulkan") {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn resolve_catalog_gguf_path(paths: &AppPaths, profile: &ModelProfile) -> Option<String> {
     let target_dir = paths.models_dir.join(&profile.id);
     if let Some(filename) = profile.download_filenames.first() {
@@ -750,7 +777,15 @@ pub fn ensure_managed_llama_binary(paths: &AppPaths, config: &AppConfig) -> Resu
         ));
     }
 
-    // 2. Managed download location.
+    // 1.5. Vulkan binary for AMD/Intel GPU (no restart needed — llama-server starts on demand).
+    if config.vulkan_gpu_enabled {
+        let vulkan = crate::gpu_runtime::vulkan_binary_path(paths);
+        if crate::gpu_runtime::is_vulkan_installed(paths) {
+            return Ok(vulkan.display().to_string());
+        }
+    }
+
+    // 2. Managed CPU download location.
     let managed = paths
         .data_dir
         .join("runtime")

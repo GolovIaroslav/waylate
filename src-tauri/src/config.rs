@@ -35,10 +35,13 @@ pub struct AppConfig {
     pub yandex_folder_id: String,
     pub ui_language: String,
     pub theme: String,
-    /// User opted into GPU translation. When true and the GPU onnxruntime is installed,
-    /// the app loads the CUDA/ROCm runtime instead of the bundled CPU one. ORT loads its
-    /// library once per process, so toggling this requires an app restart.
+    /// User opted into NVIDIA CUDA GPU translation. When true and the GPU onnxruntime is
+    /// installed, the app loads the CUDA runtime instead of the bundled CPU one. ORT loads
+    /// its library once per process, so toggling this requires an app restart.
     pub gpu_enabled: bool,
+    /// User opted into Vulkan GPU translation for AMD/Intel. When true, llama-server is
+    /// launched with the Vulkan-enabled binary (downloaded separately). No restart needed.
+    pub vulkan_gpu_enabled: bool,
     pub installed_models: HashMap<String, InstalledModelMetadata>,
 }
 
@@ -65,6 +68,7 @@ impl Default for AppConfig {
             ui_language: "en".into(),
             theme: "light".into(),
             gpu_enabled: false,
+            vulkan_gpu_enabled: false,
             installed_models: HashMap::new(),
         }
     }
@@ -141,14 +145,21 @@ pub fn save(paths: &AppPaths, config: &AppConfig) -> Result<(), String> {
 
 fn migrate_legacy_model_selection(_paths: &AppPaths, config: &mut AppConfig) -> bool {
     let previous = config.model_id.clone();
-    match config.model_id.as_str() {
-        "nllb-200-ct2" | "nllb-200-ct2-int8" => {
-            config.model_id = "nllb-200-distilled-600m-onnx".into();
+    let new_id = match config.model_id.as_str() {
+        "nllb-200-ct2" | "nllb-200-ct2-int8" => Some("nllb-200-distilled-600m-onnx"),
+        "tencent-hy-mt2-gguf" => Some("tencent-hy-mt2-1.8b-gguf"),
+        _ => None,
+    };
+    if let Some(new_id) = new_id {
+        config.model_id = new_id.to_string();
+        // The installed-model metadata is keyed by the old model id; move it onto the
+        // new id so the migrated model is still recognized as installed.
+        if let Some(meta) = config.installed_models.remove(&previous) {
+            config
+                .installed_models
+                .entry(new_id.to_string())
+                .or_insert(meta);
         }
-        "tencent-hy-mt2-gguf" => {
-            config.model_id = "tencent-hy-mt2-1.8b-gguf".into();
-        }
-        _ => {}
     }
     config.model_id != previous
 }

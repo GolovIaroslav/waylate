@@ -467,6 +467,7 @@ async fn download_catalog_model(
 /// Synthetic model id the GPU runtime download reports progress under, so the existing
 /// `model-download-progress` listener and progress bar can render it without new plumbing.
 const GPU_DOWNLOAD_ID: &str = "gpu-runtime";
+const VULKAN_DOWNLOAD_ID: &str = "vulkan-runtime";
 
 /// Download the self-contained CUDA onnxruntime bundle and the fp16 weights, flip the GPU
 /// flag, then restart so ORT loads the GPU library before any translation call.
@@ -555,6 +556,158 @@ fn disable_gpu_acceleration(app: AppHandle, state: State<'_, AppState>) -> Resul
     config.gpu_enabled = false;
     config::save(&state.paths, &config)?;
     app.restart()
+}
+
+/// Download the Vulkan-enabled llama-server binary (~31 MB) and, if no GGUF translation
+/// model is installed yet, also download Tencent Hy-MT2 1.8B (~1.1 GB). Then set
+/// `vulkan_gpu_enabled = true` and unload running servers so the next translation starts
+/// the Vulkan binary. No app restart needed.
+#[tauri::command]
+async fn enable_vulkan_acceleration(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let paths = state.paths.clone();
+    let app_for_worker = app.clone();
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        // Step 1 — Vulkan binary (0 → 0.45).
+        emit_download(
+            &app_for_worker,
+            VULKAN_DOWNLOAD_ID,
+            "downloading",
+            "Downloading Vulkan runtime",
+            0.0,
+            0,
+            None,
+        );
+        gpu_runtime::download_vulkan_runtime(&paths, &mut |frac, msg| {
+            emit_download(
+                &app_for_worker,
+                VULKAN_DOWNLOAD_ID,
+                "downloading",
+                msg,
+                (frac * 0.45).clamp(0.0, 0.45),
+                0,
+                None,
+            );
+        })?;
+
+        // Step 2 — GGUF model (0.45 → 0.95) only if none is installed yet.
+        let gguf_id = "tencent-hy-mt2-1.8b-gguf";
+        let gguf_file = "Hy-MT2-1.8B-Q4_K_M.gguf";
+        let gguf_dir = paths.models_dir.join(gguf_id);
+        let gguf_path = gguf_dir.join(gguf_file);
+        if !gguf_path.is_file() {
+            std::fs::create_dir_all(&gguf_dir).map_err(|err| err.to_string())?;
+            let url = format!(
+                "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/resolve/main/{gguf_file}"
+            );
+            let part = gguf_dir.join(format!("{gguf_file}.part"));
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(60 * 60))
+                .build()
+                .map_err(|err| err.to_string())?;
+            download_hf_file_with_progress(
+                &client,
+                &url,
+                &part,
+                &mut |downloaded, total| {
+                    let model_frac = total.map(|t| downloaded as f64 / t as f64).unwrap_or(0.0);
+                    emit_download(
+                        &app_for_worker,
+                        VULKAN_DOWNLOAD_ID,
+                        "downloading",
+                        "Downloading translation model",
+                        (0.45 + model_frac * 0.5).clamp(0.45, 0.95),
+                        downloaded,
+                        total,
+                    );
+                },
+            )?;
+            std::fs::rename(&part, &gguf_path).map_err(|err| {
+                format!("Could not finalize {gguf_file}: {err}")
+            })?;
+        }
+
+        // Step 3 — update config.
+        let mut config = config::load(&paths)?;
+        config.vulkan_gpu_enabled = true;
+        // If currently on an ONNX model, switch to the GGUF model so Vulkan is actually used.
+        let is_onnx = config.model_id.ends_with("-onnx");
+        if is_onnx {
+            config.model_id = gguf_id.into();
+        }
+        config::save(&paths, &config)?;
+
+        emit_download(
+            &app_for_worker,
+            VULKAN_DOWNLOAD_ID,
+            "done",
+            "GPU ready",
+            1.0,
+            0,
+            None,
+        );
+        Ok(())
+    })
+    .await
+    .map_err(|err| err.to_string())??;
+
+    // Unload CPU llama-server so the next translation picks the Vulkan binary.
+    state.runtime.shutdown_all()?;
+    engines::onnx_mt::unload_all();
+    Ok(())
+}
+
+/// Turn Vulkan (AMD/Intel) GPU translation off. The Vulkan binary is kept on disk so
+/// re-enabling is instant (no re-download).
+#[tauri::command]
+fn disable_vulkan_acceleration(state: State<'_, AppState>) -> Result<(), String> {
+    let mut config = config::load(&state.paths)?;
+    config.vulkan_gpu_enabled = false;
+    config::save(&state.paths, &config)?;
+    state.runtime.shutdown_all()?;
+    engines::onnx_mt::unload_all();
+    Ok(())
+}
+
+/// Download a single file from HuggingFace with per-chunk progress callbacks.
+fn download_hf_file_with_progress(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    dest: &Path,
+    on_progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<(), String> {
+    use std::io::Write as _;
+    let mut response = client
+        .get(url)
+        .send()
+        .map_err(|err| format!("Could not download {url}: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("Download returned an error for {url}: {err}"))?;
+    let total = response.content_length();
+    let mut out =
+        File::create(dest).map_err(|err| format!("Could not create {}: {err}", dest.display()))?;
+    let mut buf = [0u8; 256 * 1024];
+    let mut downloaded = 0u64;
+    let mut last_emit = 0u64;
+    loop {
+        let n = response
+            .read(&mut buf)
+            .map_err(|err| format!("Read error from {url}: {err}"))?;
+        if n == 0 {
+            break;
+        }
+        out.write_all(&buf[..n])
+            .map_err(|err| format!("Write error to {}: {err}", dest.display()))?;
+        downloaded += n as u64;
+        if downloaded - last_emit >= 8 * 1024 * 1024 {
+            last_emit = downloaded;
+            on_progress(downloaded, total);
+        }
+    }
+    Ok(())
 }
 
 async fn install_spec_model(
@@ -1799,6 +1952,8 @@ pub fn run() {
             cancel_model_download,
             enable_gpu_acceleration,
             disable_gpu_acceleration,
+            enable_vulkan_acceleration,
+            disable_vulkan_acceleration,
             restart_app,
             unload_models
         ])
