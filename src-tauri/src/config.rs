@@ -128,8 +128,19 @@ pub fn load(paths: &AppPaths) -> Result<AppConfig, String> {
 
     let raw = fs::read_to_string(&paths.config_file)
         .map_err(|err| format!("Could not read {}: {err}", paths.config_file.display()))?;
-    let mut config: AppConfig =
-        serde_json::from_str(&raw).map_err(|err| format!("Could not parse config: {err}"))?;
+    let mut config: AppConfig = match serde_json::from_str(&raw) {
+        Ok(config) => config,
+        Err(err) => {
+            // A corrupt config must not block the app from starting. Keep the broken
+            // file as a .bak for diagnostics and fall back to defaults.
+            eprintln!("Could not parse config, falling back to defaults: {err}");
+            let backup = paths.config_file.with_extension("json.bak");
+            let _ = fs::rename(&paths.config_file, &backup);
+            let config = AppConfig::default();
+            save(paths, &config)?;
+            return Ok(config);
+        }
+    };
     if migrate_legacy_model_selection(paths, &mut config) {
         save(paths, &config)?;
     }
@@ -139,7 +150,12 @@ pub fn load(paths: &AppPaths) -> Result<AppConfig, String> {
 pub fn save(paths: &AppPaths, config: &AppConfig) -> Result<(), String> {
     paths.ensure()?;
     let raw = serde_json::to_string_pretty(config).map_err(|err| err.to_string())?;
-    fs::write(&paths.config_file, raw)
+    // Write to a temp file in the same dir then rename: rename() is atomic on the same
+    // filesystem, so a kill mid-write can never leave a truncated/empty config.json.
+    let tmp = paths.config_file.with_extension("json.tmp");
+    fs::write(&tmp, raw)
+        .map_err(|err| format!("Could not write {}: {err}", tmp.display()))?;
+    fs::rename(&tmp, &paths.config_file)
         .map_err(|err| format!("Could not write {}: {err}", paths.config_file.display()))
 }
 

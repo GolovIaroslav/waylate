@@ -16,6 +16,11 @@ pub fn get(provider: &str) -> Result<String, String> {
 }
 
 pub fn set(provider: &str, value: &str) -> Result<(), String> {
+    // An empty value means "clear the key". Writing "" into the Secret Service leaves a
+    // dangling empty entry (and can block later set() on KWallet), so delete instead.
+    if value.is_empty() {
+        return delete(provider);
+    }
     Entry::new(SERVICE, provider)
         .map_err(|err| format!("Could not open keyring entry: {err}"))?
         .set_password(value)

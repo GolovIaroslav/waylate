@@ -55,6 +55,9 @@ pub fn insert(db_path: &Path, entry: &HistoryEntry) -> Result<(), String> {
 }
 
 pub fn list(db_path: &Path, limit: i64) -> Result<Vec<HistoryEntry>, String> {
+    // SQLite treats a negative LIMIT as "no limit", which would load the entire table
+    // into memory and freeze the UI. Clamp to a non-negative bound.
+    let limit = limit.max(0);
     init(db_path)?;
     let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
     let mut stmt = conn
