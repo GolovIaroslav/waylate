@@ -12,12 +12,16 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock,
     },
 };
 use tokenizers::Tokenizer;
 
-static MODEL_CACHE: OnceLock<Mutex<HashMap<String, LoadedOnnxModel>>> = OnceLock::new();
+// Each model is wrapped in its own Mutex so the global cache lock is held only long enough
+// to look the model up and clone the Arc — never across the (multi-second) inference. That
+// lets unload_model() acquire the cache lock immediately even while a translation runs.
+static MODEL_CACHE: OnceLock<Mutex<HashMap<String, Arc<Mutex<LoadedOnnxModel>>>>> =
+    OnceLock::new();
 
 /// Set once at startup by `configure_ort_dylib` when the GPU onnxruntime is the chosen
 /// library. The model loader reads it to prefer the fp16 weights (which the CUDA EP runs
@@ -25,12 +29,9 @@ static MODEL_CACHE: OnceLock<Mutex<HashMap<String, LoadedOnnxModel>>> = OnceLock
 static GPU_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn active_device(profile_id: &str) -> Option<String> {
-    MODEL_CACHE
-        .get()?
-        .lock()
-        .ok()?
-        .get(profile_id)
-        .map(|m| m.device.clone())
+    let model = MODEL_CACHE.get()?.lock().ok()?.get(profile_id)?.clone();
+    let device = model.lock().ok()?.device.clone();
+    Some(device)
 }
 
 pub fn preload(entry: &ModelCatalogEntry, paths: &AppPaths) {
@@ -42,7 +43,7 @@ pub fn preload(entry: &ModelCatalogEntry, paths: &AppPaths) {
     if let Ok(mut cache) = cache.lock() {
         if !cache.contains_key(&entry.id) {
             if let Ok(loaded) = LoadedOnnxModel::load(entry, &model_dir) {
-                cache.insert(entry.id.clone(), loaded);
+                cache.insert(entry.id.clone(), Arc::new(Mutex::new(loaded)));
             }
         }
     }
@@ -79,6 +80,15 @@ pub fn gpu_runtime_dir(paths: &AppPaths) -> PathBuf {
 /// bundled CPU lib next to the binary → system-installed lib (dev fallback). Returns the
 /// chosen path for logging, or None when no library was found.
 pub fn configure_ort_dylib(paths: &AppPaths, config: &AppConfig) -> Option<String> {
+    // ORT resolves its shared library exactly once per process, so this must run only once:
+    // a second call could flip GPU_ACTIVE and desync it from the already-loaded library.
+    static CONFIGURED: OnceLock<Option<String>> = OnceLock::new();
+    CONFIGURED
+        .get_or_init(|| configure_ort_dylib_inner(paths, config))
+        .clone()
+}
+
+fn configure_ort_dylib_inner(paths: &AppPaths, config: &AppConfig) -> Option<String> {
     // Respect an explicit override (debugging / unusual setups) without touching it.
     if let Ok(existing) = std::env::var("ORT_DYLIB_PATH") {
         if !existing.trim().is_empty() {
@@ -142,14 +152,20 @@ pub fn translate_with_progress(
     }
 
     let cache = MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache.lock().map_err(|_| "ONNX model cache is poisoned")?;
-    if !cache.contains_key(&entry.id) {
-        let loaded = LoadedOnnxModel::load(entry, &model_dir)?;
-        cache.insert(entry.id.clone(), loaded);
-    }
-    let model = cache
-        .get_mut(&entry.id)
-        .ok_or_else(|| "ONNX model cache lost the loaded model unexpectedly".to_string())?;
+    // Hold the global cache lock only to look up / load the model and clone its Arc, then
+    // release it so unload_model() never has to wait for inference to finish.
+    let model = {
+        let mut cache = cache.lock().map_err(|_| "ONNX model cache is poisoned")?;
+        if !cache.contains_key(&entry.id) {
+            let loaded = LoadedOnnxModel::load(entry, &model_dir)?;
+            cache.insert(entry.id.clone(), Arc::new(Mutex::new(loaded)));
+        }
+        cache
+            .get(&entry.id)
+            .ok_or_else(|| "ONNX model cache lost the loaded model unexpectedly".to_string())?
+            .clone()
+    };
+    let mut model = model.lock().map_err(|_| "ONNX model is poisoned")?;
     model.translate(text, source_lang, target_lang, on_progress)
 }
 
@@ -615,9 +631,11 @@ fn initial_cache_tensor(dims: &[usize], ty: TensorElementType) -> Result<DynValu
         TensorElementType::Float32 => Tensor::from_array((dims.to_vec(), vec![0_f32; count]))
             .map(|t| t.upcast().into())
             .map_err(|e| format!("Could not build zero f32 cache tensor: {e}")),
-        TensorElementType::Float16 => Err(
-            "Unsupported float16 cache tensor — use a float32 or int8 quantised model".into(),
-        ),
+        TensorElementType::Float16 => {
+            Tensor::from_array((dims.to_vec(), vec![half::f16::ZERO; count]))
+                .map(|t| t.upcast().into())
+                .map_err(|e| format!("Could not build zero f16 cache tensor: {e}"))
+        }
         TensorElementType::Int64 => Tensor::from_array((dims.to_vec(), vec![0_i64; count]))
             .map(|t| t.upcast().into())
             .map_err(|e| format!("Could not build zero i64 cache tensor: {e}")),
