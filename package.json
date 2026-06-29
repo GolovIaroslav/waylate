@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "tauri": "tauri"
+    "tauri": "NO_STRIP=1 APPIMAGE_EXTRACT_AND_RUN=1 tauri"
   },
   "license": "MIT",
   "dependencies": {
