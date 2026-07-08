@@ -1,7 +1,7 @@
 [package]
 name = "waylate"
-version = "0.1.4"
-description = "Wayland-first local translator for Arch and KDE Plasma"
+version = "0.1.5"
+description = "Wayland popup translator for Arch and KDE Plasma — API key or local models"
 authors = ["jar"]
 edition = "2021"
 

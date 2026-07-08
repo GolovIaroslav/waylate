@@ -1,8 +1,8 @@
 # Maintainer: jar
 pkgname=waylate
-pkgver=0.1.0
+pkgver=0.1.5
 pkgrel=1
-pkgdesc="Wayland-first local popup translator for Arch Linux and KDE Plasma"
+pkgdesc="Wayland popup translator for Arch Linux and KDE Plasma (DeepL/Google/Yandex API or local models)"
 arch=("x86_64")
 url="https://github.com/jar/waylate"
 license=("MIT")

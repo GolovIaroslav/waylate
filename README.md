@@ -1,9 +1,13 @@
 # Waylate
 
-Waylate is a small Wayland-first popup translator for Arch Linux and KDE Plasma.
-The main flow is simple: select text anywhere, press your KDE shortcut, and a
-translation popup opens. Local translation models are the default idea; network
-API providers exist, but they stay disabled until you enable them.
+Waylate is a popup translator for Arch Linux and KDE Plasma. Select text
+anywhere, press your KDE shortcut, and a translation popup opens.
+
+Use it right away with your own DeepL, Google Cloud Translate or Yandex Cloud
+Translate API key — no downloads, no GPU, nothing to configure beyond pasting
+a key. Prefer to keep translation fully offline? Waylate can also run a local
+model (NLLB-200, or a GGUF model through llama.cpp) instead — no API key,
+nothing leaves your machine.
 
 ## Install on Arch
 
@@ -66,16 +70,27 @@ waylate translate-clipboard
 waylate settings
 ```
 
-## Models
+## API Providers
 
-Waylate ships with a small model catalog instead of pretending that every
-Hugging Face repository can run everywhere.
+The fastest way to get started: DeepL, Google Cloud Translate and Yandex Cloud
+Translate are built in. Open Settings, turn on network providers, paste your
+own key, and pick that provider as the default model — no download, no GPU.
+Waylate stores API keys through the system Secret Service keyring and does not
+write them into `config.json`.
 
-- `Tencent Hy-MT GGUF`: use a local OpenAI-compatible server, for example
-  `llama.cpp` server on `http://127.0.0.1:8080/v1/chat/completions`.
+Waylate does not ship shared API keys. Each user must add their own provider key.
+Yandex also needs a Cloud Folder ID.
+
+## Local Models
+
+Prefer nothing to leave your machine, or want to translate with no network at
+all? Waylate can also run a local model instead of an API key.
+
 - `Meta NLLB-200 CTranslate2`: use Settings > Local model > Download and
   configure NLLB. Waylate downloads the catalog model from Hugging Face and
   saves the CTranslate2 model/tokenizer paths automatically.
+- `Tencent Hy-MT GGUF`: use a local OpenAI-compatible server, for example
+  `llama.cpp` server on `http://127.0.0.1:8080/v1/chat/completions`.
 - `Custom local model`: use your own endpoint or local setup.
 
 For CTranslate2/NLLB, Waylate calls:
@@ -86,16 +101,6 @@ waylate-ct2-translate --model /path/to/ct2-model --tokenizer facebook/nllb-200-d
 
 The selected model controls the visible language list. NLLB profiles show NLLB
 language codes; API and GGUF profiles show a smaller practical list.
-
-## API Providers
-
-DeepL, Google Cloud Translate and Yandex Cloud Translate profiles are included
-for testing and fallback workflows. They are disabled by default. Enable network
-providers in Settings before selecting them. Waylate stores API keys through the
-system Secret Service keyring and does not write them into `config.json`.
-
-Waylate does not ship shared API keys. Each user must add their own provider key.
-Yandex also needs a Cloud Folder ID.
 
 ## Local Files
 

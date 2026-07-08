@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.5
+
+- Reposition Waylate as an API-key translator first (DeepL, Google, Yandex), with local models as an offline/privacy option, in the README and package metadata.
+- Fix the popup window not raising above other windows when triggered from a background instance (e.g. a mouse macro) on KDE/Wayland; run under XWayland and activate via `xdotool` so KWin's focus-stealing prevention no longer blocks it.
+- Add Vulkan GPU acceleration for AMD/Intel via a bundled llama-server Vulkan binary.
+- Support fp16 KV-cache for the ONNX NLLB engine, shorten the model-cache lock, and initialize ONNX Runtime once instead of per translation.
+- Fix local translation: block auto-detect for engines that need an explicit source language, use the correct TranslateGemma chat template, respect the configured context size, and fix the local llama-server URL constant.
+- Harden config saves, secrets and history against corruption and bad input; add test coverage.
+- Handle clipboard copy errors instead of failing silently, and fix a model reinstall race.
+- Add a default-model picker to Settings, and a Save button for the Yandex Folder ID field.
+- Fix the toolbar zoom controls overlapping the side rail, and a duplicate CSS rule that broke the API key rows' layout.
+
 ## 0.1.4
 
 - Enable TranslateGemma: force the built-in gemma chat template so llama-server no longer crashes on the model's strict embedded template.
