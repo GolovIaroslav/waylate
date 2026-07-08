@@ -16,6 +16,7 @@
     Power,
     RefreshCw,
     Repeat2,
+    Save,
     Settings,
     Trash2,
     Zap,
@@ -517,6 +518,8 @@
       readSelection: "Use selected text",
       pasteClipboard: "Paste from clipboard",
       copyTranslation: "Copy translation",
+      defaultModel: "Default model",
+      defaultModelHint: "Loads automatically when Waylate starts. Pick an API provider (DeepL, Google, Yandex) to skip loading a local neural network and save RAM.",
       localModel: "Local model",
       runtimeLoaded: "Loaded",
       runtimeCold: "Not loaded yet",
@@ -672,6 +675,8 @@
       readSelection: "Взять выделенный текст",
       pasteClipboard: "Вставить из буфера",
       copyTranslation: "Скопировать перевод",
+      defaultModel: "Модель по умолчанию",
+      defaultModelHint: "Загружается автоматически при запуске Waylate. Выберите API-провайдера (DeepL, Google, Yandex), чтобы не грузить локальную нейросеть и экономить ОЗУ.",
       localModel: "Локальная модель",
       runtimeLoaded: "Загружена",
       runtimeCold: "Еще не загружена",
@@ -827,6 +832,8 @@
       readSelection: "Použiť vybraný text",
       pasteClipboard: "Vložiť zo schránky",
       copyTranslation: "Kopírovať preklad",
+      defaultModel: "Predvolený model",
+      defaultModelHint: "Automaticky sa načíta pri spustení Waylate. Vyberte API poskytovateľa (DeepL, Google, Yandex), aby sa nenačítala lokálna neurónová sieť a ušetrila sa RAM.",
       localModel: "Lokálny model",
       runtimeLoaded: "Nahraté",
       runtimeCold: "Ešte nie je nahratý",
@@ -2143,6 +2150,36 @@
         </section>
       {:else if tab === "settings"}
         <section class="settings-grid">
+          <div class="group group-full">
+            <div class="group-head">
+              <h2>{t("defaultModel")}</h2>
+            </div>
+            <p class="muted">{t("defaultModelHint")}</p>
+            {#if selectableModels.length}
+              <select value={config.modelId} on:change={(event) => changeModel(event.currentTarget.value)}>
+                {#if networkSelectableModels.length}
+                  <optgroup label={t("localModelsGroup")}>
+                    {#each localSelectableModels as model}
+                      <option value={model.id}>{model.name}</option>
+                    {/each}
+                  </optgroup>
+                  <optgroup label={t("onlineProvidersGroup")}>
+                    {#each networkSelectableModels as model}
+                      <option value={model.id}>{model.name}</option>
+                    {/each}
+                  </optgroup>
+                {:else}
+                  {#each selectableModels as model}
+                    <option value={model.id}>{model.name}</option>
+                  {/each}
+                {/if}
+              </select>
+            {:else}
+              <select disabled>
+                <option>{t("noModelsInstalled")}</option>
+              </select>
+            {/if}
+          </div>
           <div class="group">
             <div class="group-head">
               <h2>{t("localModel")}</h2>
@@ -2360,7 +2397,7 @@
               <span>{t("deeplKey")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "deeplKey")} on:mouseenter={() => showHelp("deeplKey")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "deeplKey"}<span class="help-popover">{help("deeplKey")}</span>{/if}</button></span>
               <div class="inline">
                 <input bind:value={deeplKey} type="password" placeholder={t("storedSecret")} />
-                <button class="primary" on:click={() => saveKey("deepl", deeplKey)} disabled={!deeplKey.trim()}>{t("keySave")}</button>
+                <button class="primary" on:click={() => saveKey("deepl", deeplKey)} disabled={!deeplKey.trim()} title={t("keySave")} aria-label={t("keySave")}><Save size={15} /></button>
                 <button on:click={() => clearKey("deepl")} title={t("clearField")} aria-label={t("clearField")}><Trash2 size={15} /></button>
               </div>
               {#if keyStateHint(snapshot.hasDeeplKey)}
@@ -2371,7 +2408,7 @@
               <span>{t("googleKey")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "googleKey")} on:mouseenter={() => showHelp("googleKey")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "googleKey"}<span class="help-popover">{help("googleKey")}</span>{/if}</button></span>
               <div class="inline">
                 <input bind:value={googleKey} type="password" placeholder={t("storedSecret")} />
-                <button class="primary" on:click={() => saveKey("google", googleKey)} disabled={!googleKey.trim()}>{t("keySave")}</button>
+                <button class="primary" on:click={() => saveKey("google", googleKey)} disabled={!googleKey.trim()} title={t("keySave")} aria-label={t("keySave")}><Save size={15} /></button>
                 <button on:click={() => clearKey("google")} title={t("clearField")} aria-label={t("clearField")}><Trash2 size={15} /></button>
               </div>
               {#if keyStateHint(snapshot.hasGoogleKey)}
@@ -2382,7 +2419,7 @@
               <span>{t("yandexKey")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "yandexKey")} on:mouseenter={() => showHelp("yandexKey")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "yandexKey"}<span class="help-popover">{help("yandexKey")}</span>{/if}</button></span>
               <div class="inline">
                 <input bind:value={yandexKey} type="password" placeholder={t("storedSecret")} />
-                <button class="primary" on:click={() => saveKey("yandex", yandexKey)} disabled={!yandexKey.trim()}>{t("keySave")}</button>
+                <button class="primary" on:click={() => saveKey("yandex", yandexKey)} disabled={!yandexKey.trim()} title={t("keySave")} aria-label={t("keySave")}><Save size={15} /></button>
                 <button on:click={() => clearKey("yandex")} title={t("clearField")} aria-label={t("clearField")}><Trash2 size={15} /></button>
               </div>
               {#if keyStateHint(snapshot.hasYandexKey)}
@@ -2400,7 +2437,7 @@
               <span>{t("localBearer")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "localBearer")} on:mouseenter={() => showHelp("localBearer")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "localBearer"}<span class="help-popover">{help("localBearer")}</span>{/if}</button></span>
               <div class="inline">
                 <input bind:value={localKey} type="password" placeholder={t("optionalLocalServer")} />
-                <button class="primary" on:click={() => saveKey("openai-compatible", localKey)} disabled={!localKey.trim()}>{t("keySave")}</button>
+                <button class="primary" on:click={() => saveKey("openai-compatible", localKey)} disabled={!localKey.trim()} title={t("keySave")} aria-label={t("keySave")}><Save size={15} /></button>
                 <button on:click={() => clearKey("openai-compatible")} title={t("clearField")} aria-label={t("clearField")}><Trash2 size={15} /></button>
               </div>
               {#if keyStateHint(snapshot.hasLocalKey)}
@@ -3176,6 +3213,10 @@
     background: var(--surface);
   }
 
+  .group-full {
+    grid-column: 1 / -1;
+  }
+
   .muted {
     margin: 0;
     color: var(--muted-text);
@@ -3369,11 +3410,6 @@
   .check input {
     width: 16px;
     height: 16px;
-  }
-
-  .inline {
-    display: grid;
-    grid-template-columns: 1fr 36px;
   }
 
   .field-hint {
