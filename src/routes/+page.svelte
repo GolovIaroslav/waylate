@@ -2700,7 +2700,7 @@
     min-height: 52px;
     padding: 8px 12px 10px;
     display: grid;
-    grid-template-columns: minmax(150px, 1.5fr) minmax(120px, 1fr) 30px minmax(120px, 1fr) auto auto;
+    grid-template-columns: minmax(150px, 1.5fr) minmax(120px, 1fr) 30px minmax(120px, 1fr) auto auto auto;
     gap: 8px;
     align-items: end;
     border: 1px solid var(--border);

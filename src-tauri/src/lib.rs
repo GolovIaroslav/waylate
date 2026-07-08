@@ -1307,8 +1307,18 @@ fn set_pending(app: &AppHandle, pending: PendingRequest) -> Result<(), String> {
 
 fn show_window(app: &AppHandle, title: &str) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
+        window.unminimize().map_err(|err| err.to_string())?;
         window.show().map_err(|err| err.to_string())?;
         window.set_focus().map_err(|err| err.to_string())?;
+        // set_focus alone doesn't always raise a window that is open but buried behind
+        // others under KWin/Wayland. A brief always-on-top pulse forces the compositor
+        // to restack it to the front without leaving it pinned on top afterwards.
+        window
+            .set_always_on_top(true)
+            .map_err(|err| err.to_string())?;
+        window
+            .set_always_on_top(false)
+            .map_err(|err| err.to_string())?;
         return Ok(());
     }
 
