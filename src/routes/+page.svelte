@@ -2150,7 +2150,7 @@
         </section>
       {:else if tab === "settings"}
         <section class="settings-grid">
-          <div class="group group-full">
+          <div class="group">
             <div class="group-head">
               <h2>{t("defaultModel")}</h2>
             </div>
@@ -2179,8 +2179,6 @@
                 <option>{t("noModelsInstalled")}</option>
               </select>
             {/if}
-          </div>
-          <div class="group">
             <div class="group-head">
               <h2>{t("localModel")}</h2>
               <span class="pill" class:ok={localModelReady}><CheckCircle2 size={13} /> {modelPillLabel()}</span>
@@ -2430,6 +2428,7 @@
               <span>{t("yandexFolderId")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "yandexFolderId")} on:mouseenter={() => showHelp("yandexFolderId")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "yandexFolderId"}<span class="help-popover">{help("yandexFolderId")}</span>{/if}</button></span>
               <div class="inline">
                 <input bind:value={config.yandexFolderId} placeholder="Folder ID" />
+                <button class="primary" on:click={() => persistConfig(true)} disabled={!config.yandexFolderId.trim()} title={t("keySave")} aria-label={t("keySave")}><Save size={15} /></button>
                 <button on:click={() => config && (config.yandexFolderId = "")} title={t("clearField")} aria-label={t("clearField")}><Trash2 size={15} /></button>
               </div>
             </label>
@@ -3211,10 +3210,6 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--surface);
-  }
-
-  .group-full {
-    grid-column: 1 / -1;
   }
 
   .muted {

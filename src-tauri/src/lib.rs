@@ -1310,15 +1310,7 @@ fn show_window(app: &AppHandle, title: &str) -> Result<(), String> {
         window.unminimize().map_err(|err| err.to_string())?;
         window.show().map_err(|err| err.to_string())?;
         window.set_focus().map_err(|err| err.to_string())?;
-        // set_focus alone doesn't always raise a window that is open but buried behind
-        // others under KWin/Wayland. A brief always-on-top pulse forces the compositor
-        // to restack it to the front without leaving it pinned on top afterwards.
-        window
-            .set_always_on_top(true)
-            .map_err(|err| err.to_string())?;
-        window
-            .set_always_on_top(false)
-            .map_err(|err| err.to_string())?;
+        raise_via_wm();
         return Ok(());
     }
 
@@ -1331,6 +1323,20 @@ fn show_window(app: &AppHandle, title: &str) -> Result<(), String> {
         .build()
         .map_err(|err| err.to_string())?;
     Ok(())
+}
+
+/// Tauri's own show()/set_focus()/always-on-top calls are not enough to raise a window that
+/// is open but buried behind others: KWin's focus-stealing prevention silently ignores a
+/// background process's own present() request, whether the window is a native Wayland
+/// toplevel or (since `maybe_reexec_for_x11`) an XWayland one. `xdotool windowactivate`
+/// issues a proper EWMH `_NET_ACTIVE_WINDOW` client message, which KWin does honor — this
+/// mirrors how the previous Crow Translate mouse macro reliably raised its window. Best
+/// effort: silently does nothing if xdotool is missing.
+fn raise_via_wm() {
+    let pid = std::process::id().to_string();
+    let _ = Command::new("xdotool")
+        .args(["search", "--pid", &pid, "windowactivate"])
+        .output();
 }
 
 fn handle_args(app: &AppHandle, args: &[String]) {
@@ -1839,6 +1845,29 @@ fn spawn_runtime_housekeeper(paths: AppPaths, runtime: Arc<RuntimeManager>) {
     });
 }
 
+/// Wayland's xdg-activation protocol requires a fresh, input-associated token to raise an
+/// already-mapped window; a background instance woken up over the single-instance IPC socket
+/// has no such token, so KWin silently ignores its present()/set_focus() calls (this is why
+/// the window pops up fine on a cold start — a brand-new toplevel gets focus — but not when
+/// waking an already-running instance from the tray). Running under XWayland sidesteps the
+/// restriction entirely, the same way the previous Crow Translate macro forced
+/// `QT_QPA_PLATFORM=xcb` to reliably raise its window. Must run before GTK initializes, so we
+/// re-exec once with GDK_BACKEND=x11 set; `exec` replaces the image (same PID), so the
+/// single-instance lock is unaffected.
+fn maybe_reexec_for_x11() {
+    use std::os::unix::process::CommandExt;
+    if std::env::var("GDK_BACKEND").map(|v| v == "x11").unwrap_or(false) {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else { return };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let err = std::process::Command::new(exe)
+        .args(args)
+        .env("GDK_BACKEND", "x11")
+        .exec();
+    eprintln!("[gtk] X11 re-exec failed ({err}); window may not raise while backgrounded");
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// When GPU translation is enabled, the downloaded onnxruntime needs its sibling libraries
 /// (CUDA runtime, cuDNN, abseil, ...) on the loader search path. glibc captures
@@ -1878,6 +1907,7 @@ fn maybe_reexec_for_gpu() {
 }
 
 pub fn run() {
+    maybe_reexec_for_x11();
     maybe_reexec_for_gpu();
 
     // ORT prebuilt binaries use OpenMP, which ignores SessionBuilder::with_intra_threads.
