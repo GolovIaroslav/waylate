@@ -38,3 +38,7 @@ sha2 = "0.10"
 libc = "0.2"
 flate2 = "1"
 tar = "0.4"
+
+[dev-dependencies]
+# In-memory keyring store so secrets tests don't touch the real Secret Service / KWallet.
+keyring-core = "1.0.0"

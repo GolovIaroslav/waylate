@@ -209,4 +209,63 @@ mod tests {
         assert_eq!(config.custom_backend_mode, "external-openai");
         assert!(config.installed_models.is_empty());
     }
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // A unique on-disk layout per test so save/load never collide across parallel runs.
+    fn temp_paths() -> AppPaths {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("waylate-config-{}-{}", std::process::id(), n));
+        AppPaths {
+            config_file: root.join("config/config.json"),
+            history_db: root.join("data/history.sqlite3"),
+            models_dir: root.join("data/models"),
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            cache_dir: root.join("cache"),
+        }
+    }
+
+    #[test]
+    fn save_then_load_round_trips_non_default_values() {
+        let paths = temp_paths();
+        let mut config = AppConfig::default();
+        config.target_lang = "ru".into();
+        config.history_enabled = true;
+        config.local_context_size = 8192;
+        config.vulkan_gpu_enabled = true;
+        save(&paths, &config).expect("save");
+
+        let loaded = load(&paths).expect("load");
+        assert_eq!(loaded.target_lang, "ru");
+        assert!(loaded.history_enabled);
+        assert_eq!(loaded.local_context_size, 8192);
+        assert!(loaded.vulkan_gpu_enabled);
+        let _ = std::fs::remove_dir_all(&paths.config_dir.parent().unwrap());
+    }
+
+    #[test]
+    fn missing_config_file_writes_defaults() {
+        let paths = temp_paths();
+        assert!(!paths.config_file.exists());
+        let config = load(&paths).expect("load creates defaults");
+        assert_eq!(config.target_lang, AppConfig::default().target_lang);
+        assert!(paths.config_file.exists());
+        let _ = std::fs::remove_dir_all(&paths.config_dir.parent().unwrap());
+    }
+
+    #[test]
+    fn corrupt_config_is_backed_up_and_replaced_with_defaults() {
+        let paths = temp_paths();
+        paths.ensure().expect("ensure dirs");
+        std::fs::write(&paths.config_file, b"{ not valid json ]").expect("write corrupt config");
+
+        // Regression: a corrupt config must not block startup. Load falls back to defaults
+        // and preserves the broken file as a .bak for diagnostics.
+        let config = load(&paths).expect("corrupt config should not error");
+        assert_eq!(config.model_id, AppConfig::default().model_id);
+        assert!(paths.config_file.with_extension("json.bak").exists());
+        let _ = std::fs::remove_dir_all(&paths.config_dir.parent().unwrap());
+    }
 }

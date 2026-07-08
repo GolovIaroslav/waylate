@@ -1963,3 +1963,44 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running Waylate");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_ratio_uses_known_total() {
+        assert_eq!(download_ratio(50, Some(100)), 0.5);
+    }
+
+    #[test]
+    fn download_ratio_clamps_to_visible_range() {
+        // Never show a literal 0% or 100% bar while a download is still in progress.
+        assert_eq!(download_ratio(0, Some(100)), 0.02);
+        assert_eq!(download_ratio(100, Some(100)), 0.99);
+    }
+
+    #[test]
+    fn download_ratio_falls_back_when_total_unknown() {
+        assert_eq!(download_ratio(500, None), 0.15);
+        assert_eq!(download_ratio(500, Some(0)), 0.15);
+    }
+
+    #[test]
+    fn human_bytes_switches_units_at_one_gib() {
+        assert_eq!(human_bytes(2 * 1024 * 1024 * 1024), "2.0 GB");
+        assert_eq!(human_bytes(512 * 1024 * 1024), "512 MB");
+    }
+
+    #[test]
+    fn human_bytes_never_reports_zero_mb() {
+        // Sub-megabyte sizes round up to "1 MB" rather than the confusing "0 MB".
+        assert_eq!(human_bytes(1024), "1 MB");
+    }
+
+    #[test]
+    fn install_manifest_path_is_under_model_dir() {
+        let path = install_manifest_path(Path::new("/models/nllb"));
+        assert_eq!(path, Path::new("/models/nllb/.waylate-complete.json"));
+    }
+}

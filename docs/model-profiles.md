@@ -20,17 +20,17 @@ response.
 ## NLLB / CTranslate2
 
 Use this profile when you have a converted CTranslate2 model directory. The
-helper command is intentionally separate:
+helper command stays separate:
 
 ```bash
 waylate-ct2-translate --model ./nllb-ct2 --tokenizer facebook/nllb-200-distilled-600M --source eng_Latn --target rus_Cyrl "hello"
 ```
 
-This keeps the desktop app small. Python ML dependencies are optional instead of
-being bundled into the GUI.
+This keeps the desktop app small. Python ML dependencies stay optional instead of
+bundled into the GUI.
 
 ## API profiles
 
-DeepL and Google are included as off-by-default providers for comparison and
+Waylate includes DeepL and Google as off-by-default providers for comparison and
 fallback. Selecting them requires enabling network providers in Settings and
 storing an API key in Secret Service.

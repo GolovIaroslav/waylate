@@ -3,7 +3,7 @@
 Waylate is a small Wayland-first popup translator for Arch Linux and KDE Plasma.
 The main flow is simple: select text anywhere, press your KDE shortcut, and a
 translation popup opens. Local translation models are the default idea; network
-API providers exist, but they stay disabled until you explicitly enable them.
+API providers exist, but they stay disabled until you enable them.
 
 ## Install on Arch
 
@@ -42,7 +42,7 @@ pipx inject huggingface-hub ctranslate2 transformers sentencepiece
 
 ## KDE Plasma Wayland Shortcut
 
-Waylate does not pretend that global shortcuts on Wayland are solved everywhere.
+Waylate does not pretend global shortcuts work everywhere on Wayland.
 For v1, the reliable KDE path is a command shortcut:
 
 1. Open System Settings.
@@ -91,8 +91,8 @@ language codes; API and GGUF profiles show a smaller practical list.
 
 DeepL, Google Cloud Translate and Yandex Cloud Translate profiles are included
 for testing and fallback workflows. They are disabled by default. Enable network
-providers in Settings before selecting them. API keys are stored through the
-system Secret Service keyring; Waylate does not write them into `config.json`.
+providers in Settings before selecting them. Waylate stores API keys through the
+system Secret Service keyring and does not write them into `config.json`.
 
 Waylate does not ship shared API keys. Each user must add their own provider key.
 Yandex also needs a Cloud Folder ID.
@@ -105,7 +105,7 @@ Waylate follows XDG directories:
 - Data and models: `~/.local/share/Waylate`
 - History: `~/.local/share/Waylate/history.sqlite3`
 
-History is off by default. When enabled, it is stored locally in SQLite.
+History is off by default. When you turn it on, Waylate stores it locally in SQLite.
 
 ## Development
 
@@ -126,8 +126,8 @@ Project shape:
 
 - Tauri 2 handles tray, CLI commands, Wayland clipboard calls, config and model backends.
 - Svelte renders the popup/settings/history UI.
-- `wl-paste --primary` is used for Wayland primary selection, with clipboard fallback.
-- Global shortcut portals are intentionally not the v1 default because KDE command shortcuts are more predictable today.
+- `wl-paste --primary` reads the Wayland primary selection, with clipboard fallback.
+- Global shortcut portals are not the v1 default because KDE command shortcuts are more predictable today.
 
 Good GitHub topics for the repository: `wayland`, `kde`, `arch-linux`,
 `tauri`, `svelte`, `translation`, `llm`, `nllb`, `ctranslate2`.

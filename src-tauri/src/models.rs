@@ -801,4 +801,41 @@ mod tests {
         assert!(!profile.downloadable);
         assert!(profile.files.is_empty());
     }
+
+    #[test]
+    fn translate_codes_always_lead_with_a_single_auto() {
+        let entry = model_catalog()
+            .into_iter()
+            .find(|profile| profile.id == "nllb-200-distilled-600m-onnx")
+            .expect("nllb entry exists");
+        let codes = entry.language_codes_for_translate();
+        // "Auto detect" is always offered first, and exactly once — the source list must
+        // never inject a second "auto" alongside the synthetic one.
+        assert_eq!(codes[0].code, "auto");
+        assert_eq!(codes.iter().filter(|lang| lang.code == "auto").count(), 1);
+        assert!(codes.len() > 1);
+    }
+
+    #[test]
+    fn nllb_model_exposes_flores_codes() {
+        let entry = model_catalog()
+            .into_iter()
+            .find(|profile| profile.id == "nllb-200-distilled-600m-onnx")
+            .expect("nllb entry exists");
+        let codes = entry.language_codes_for_translate();
+        // NLLB uses FLORES-style codes (e.g. eng_Latn), not the short UI codes.
+        assert!(codes.iter().any(|lang| lang.code.contains('_')));
+    }
+
+    #[test]
+    fn non_nllb_model_uses_short_ui_codes() {
+        let entry = model_catalog()
+            .into_iter()
+            .find(|profile| profile.engine == EngineKind::ManagedLlamaCpp)
+            .expect("a managed llama model exists");
+        let codes = entry.language_codes_for_translate();
+        assert_eq!(codes[0].code, "auto");
+        // A non-NLLB model must not leak FLORES "_Latn" codes; it speaks short UI codes.
+        assert!(!codes.iter().any(|lang| lang.code.contains("_Latn")));
+    }
 }

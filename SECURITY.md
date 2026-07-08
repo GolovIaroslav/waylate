@@ -2,7 +2,7 @@
 
 ## Reporting
 
-Please report security issues privately through GitHub Security Advisories when possible.
+Report security issues privately through GitHub Security Advisories.
 
 Do not open public issues for API key leaks, command execution bugs, or local file exposure.
 

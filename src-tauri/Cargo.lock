@@ -5481,6 +5481,7 @@ dependencies = [
  "flate2",
  "half",
  "keyring",
+ "keyring-core",
  "libc",
  "ndarray 0.16.1",
  "opener",

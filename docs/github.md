@@ -12,5 +12,5 @@ Suggested topics:
 wayland kde arch-linux tauri svelte translation llm nllb ctranslate2
 ```
 
-The README intentionally starts with installation and shortcut setup, then moves
-into model details. That is the order a Linux user needs on first install.
+The README starts with installation and shortcut setup, then model details. A
+Linux user needs that order on first install.

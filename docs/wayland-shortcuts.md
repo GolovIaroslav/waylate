@@ -1,7 +1,7 @@
 # Wayland shortcut notes
 
-Waylate is designed around Wayland, but it avoids promising one universal global
-shortcut implementation for every compositor.
+Waylate targets Wayland, but avoids promising one universal global shortcut
+implementation for every compositor.
 
 ## KDE Plasma
 
