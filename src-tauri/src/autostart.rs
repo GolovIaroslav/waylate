@@ -21,9 +21,17 @@ pub fn sync(paths: &AppPaths, enabled: bool) -> Result<(), String> {
 
     fs::create_dir_all(&autostart_dir)
         .map_err(|err| format!("Could not create {}: {err}", autostart_dir.display()))?;
+    // Desktop sessions (systemd-managed Plasma/GNOME logins especially) run autostart .desktop
+    // entries with a minimal PATH that usually excludes ~/.local/bin, so a bare "Exec=waylate"
+    // silently fails to launch at login. Use the absolute path to the running binary instead.
+    let exe_path = std::env::current_exe()
+        .map_err(|err| format!("Could not resolve the running executable path: {err}"))?;
     fs::write(
         &autostart_file,
-        "[Desktop Entry]\nType=Application\nName=Waylate\nComment=Start Waylate tray app\nExec=waylate\nIcon=dev.jar.waylate\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+        format!(
+            "[Desktop Entry]\nType=Application\nName=Waylate\nComment=Start Waylate tray app\nExec=\"{}\"\nIcon=dev.jar.waylate\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+            exe_path.display()
+        ),
     )
     .map_err(|err| format!("Could not write {}: {err}", autostart_file.display()))
 }
