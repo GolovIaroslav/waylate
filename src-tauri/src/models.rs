@@ -444,7 +444,7 @@ pub fn catalog() -> Vec<ModelProfile> {
             managed_prompt_template: None,
             managed_context_size: None,
             install_check_files: Vec::new(),
-            languages: popular_languages(),
+            languages: deepl_languages(),
             downloadable: false,
         },
         ModelProfile {
@@ -463,7 +463,7 @@ pub fn catalog() -> Vec<ModelProfile> {
             managed_prompt_template: None,
             managed_context_size: None,
             install_check_files: Vec::new(),
-            languages: popular_languages(),
+            languages: broad_network_languages(),
             downloadable: false,
         },
         ModelProfile {
@@ -482,7 +482,7 @@ pub fn catalog() -> Vec<ModelProfile> {
             managed_prompt_template: None,
             managed_context_size: None,
             install_check_files: Vec::new(),
-            languages: popular_languages(),
+            languages: broad_network_languages(),
             downloadable: false,
         },
         ModelProfile {
@@ -525,6 +525,142 @@ fn popular_languages() -> Vec<Language> {
         ("zh", "Chinese"),
         ("ja", "Japanese"),
         ("ko", "Korean"),
+    ]
+    .into_iter()
+    .map(lang)
+    .collect()
+}
+
+/// DeepL API's actual supported languages (source + target union), source:
+/// https://developers.deepl.com/docs/getting-started/supported-languages
+/// English and Portuguese must be sent with a regional variant as `target_lang`
+/// (see `deepl_target_lang` in translation.rs); this list stays on plain
+/// two-letter codes so it lines up with the rest of the app's language plumbing.
+fn deepl_languages() -> Vec<Language> {
+    [
+        ("auto", "Auto detect"),
+        ("ar", "Arabic"),
+        ("bg", "Bulgarian"),
+        ("cs", "Czech"),
+        ("da", "Danish"),
+        ("de", "German"),
+        ("el", "Greek"),
+        ("en", "English"),
+        ("es", "Spanish"),
+        ("et", "Estonian"),
+        ("fi", "Finnish"),
+        ("fr", "French"),
+        ("hu", "Hungarian"),
+        ("id", "Indonesian"),
+        ("it", "Italian"),
+        ("ja", "Japanese"),
+        ("ko", "Korean"),
+        ("lt", "Lithuanian"),
+        ("lv", "Latvian"),
+        ("nb", "Norwegian"),
+        ("nl", "Dutch"),
+        ("pl", "Polish"),
+        ("pt", "Portuguese"),
+        ("ro", "Romanian"),
+        ("ru", "Russian"),
+        ("sk", "Slovak"),
+        ("sl", "Slovenian"),
+        ("sv", "Swedish"),
+        ("tr", "Turkish"),
+        ("uk", "Ukrainian"),
+        ("zh", "Chinese"),
+    ]
+    .into_iter()
+    .map(lang)
+    .collect()
+}
+
+/// Broad, non-exhaustive language set for network providers whose real catalog
+/// (Google ~130 languages, Yandex ~100) is far larger than DeepL's. Covers all
+/// major world regions instead of the old Europe/EN/RU-only shortlist. Some
+/// rarer entries may not be accepted by every provider for every pair; the app
+/// surfaces the provider's own error in that case rather than silently failing.
+fn broad_network_languages() -> Vec<Language> {
+    [
+        ("auto", "Auto detect"),
+        ("en", "English"),
+        ("ru", "Russian"),
+        ("es", "Spanish"),
+        ("fr", "French"),
+        ("de", "German"),
+        ("it", "Italian"),
+        ("pt", "Portuguese"),
+        ("nl", "Dutch"),
+        ("pl", "Polish"),
+        ("cs", "Czech"),
+        ("sk", "Slovak"),
+        ("uk", "Ukrainian"),
+        ("ro", "Romanian"),
+        ("hu", "Hungarian"),
+        ("bg", "Bulgarian"),
+        ("el", "Greek"),
+        ("sv", "Swedish"),
+        ("da", "Danish"),
+        ("fi", "Finnish"),
+        ("nb", "Norwegian"),
+        ("lt", "Lithuanian"),
+        ("lv", "Latvian"),
+        ("et", "Estonian"),
+        ("sl", "Slovenian"),
+        ("hr", "Croatian"),
+        ("sr", "Serbian"),
+        ("bs", "Bosnian"),
+        ("mk", "Macedonian"),
+        ("sq", "Albanian"),
+        ("tr", "Turkish"),
+        ("ka", "Georgian"),
+        ("hy", "Armenian"),
+        ("az", "Azerbaijani"),
+        ("kk", "Kazakh"),
+        ("uz", "Uzbek"),
+        ("be", "Belarusian"),
+        ("ar", "Arabic"),
+        ("he", "Hebrew"),
+        ("fa", "Persian"),
+        ("ur", "Urdu"),
+        ("hi", "Hindi"),
+        ("bn", "Bengali"),
+        ("pa", "Punjabi"),
+        ("gu", "Gujarati"),
+        ("mr", "Marathi"),
+        ("ta", "Tamil"),
+        ("te", "Telugu"),
+        ("kn", "Kannada"),
+        ("ml", "Malayalam"),
+        ("si", "Sinhala"),
+        ("ne", "Nepali"),
+        ("th", "Thai"),
+        ("vi", "Vietnamese"),
+        ("id", "Indonesian"),
+        ("ms", "Malay"),
+        ("tl", "Filipino"),
+        ("my", "Burmese"),
+        ("km", "Khmer"),
+        ("lo", "Lao"),
+        ("mn", "Mongolian"),
+        ("zh", "Chinese"),
+        ("ja", "Japanese"),
+        ("ko", "Korean"),
+        ("sw", "Swahili"),
+        ("am", "Amharic"),
+        ("ha", "Hausa"),
+        ("yo", "Yoruba"),
+        ("ig", "Igbo"),
+        ("zu", "Zulu"),
+        ("xh", "Xhosa"),
+        ("af", "Afrikaans"),
+        ("is", "Icelandic"),
+        ("ga", "Irish"),
+        ("cy", "Welsh"),
+        ("eu", "Basque"),
+        ("ca", "Catalan"),
+        ("gl", "Galician"),
+        ("mt", "Maltese"),
     ]
     .into_iter()
     .map(lang)
