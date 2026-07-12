@@ -23,6 +23,26 @@ pub struct TranslationResponse {
     pub translated_text: String,
     pub provider_label: String,
     pub warning: Option<String>,
+    /// Source language the provider auto-detected, as a lowercase UI code (e.g. "en").
+    /// Only set by network providers when the request used source_lang == "auto".
+    #[serde(default)]
+    pub detected_source_lang: Option<String>,
+}
+
+/// DeepL/Google return codes like "EN-US" or "EN"; the UI's language list keys on the
+/// lowercase base code (e.g. "en"), so strip any region suffix and lowercase.
+fn normalize_detected_lang(code: &str) -> String {
+    code.split(['-', '_']).next().unwrap_or(code).to_ascii_lowercase()
+}
+
+/// DeepL's `target_lang` rejects bare "EN"/"PT" and requires a regional variant;
+/// `source_lang` has no such requirement. Everything else passes through unchanged.
+fn deepl_target_lang(code: &str) -> String {
+    match code.to_ascii_lowercase().as_str() {
+        "en" => "EN-US".into(),
+        "pt" => "PT-PT".into(),
+        other => other.to_ascii_uppercase(),
+    }
 }
 
 pub fn translate_with_progress(
@@ -54,6 +74,7 @@ pub fn translate_with_progress(
                 translated_text,
                 provider_label: "Local ONNX translation".into(),
                 warning: None,
+                detected_source_lang: None,
             }),
             EngineKind::ManagedLlamaCpp => {
                 translate_spec_managed_llama(paths, runtime_manager, config, request, &entry, on_progress)
@@ -131,6 +152,7 @@ fn translate_spec_managed_llama(
             translated_text: translated,
             provider_label: format!("Local GGUF ({})", device),
             warning: None,
+            detected_source_lang: None,
         });
     }
 
@@ -177,6 +199,7 @@ fn translate_spec_managed_llama(
         translated_text: translated,
         provider_label: format!("Local GGUF ({})", device),
         warning: None,
+        detected_source_lang: None,
     })
 }
 
@@ -259,6 +282,7 @@ fn translate_openai_compatible(
         translated_text: translated.trim().to_string(),
         provider_label: "OpenAI-compatible local server".into(),
         warning: None,
+        detected_source_lang: None,
     })
 }
 
@@ -277,6 +301,7 @@ fn translate_custom_local(
             translated_text: translated,
             provider_label: format!("Managed local GGUF ({device})"),
             warning: None,
+            detected_source_lang: None,
         });
     }
 
@@ -295,6 +320,7 @@ fn translate_custom_local(
             translated_text: translated,
             provider_label: format!("Managed local GGUF ({device})"),
             warning: None,
+            detected_source_lang: None,
         });
     }
 
@@ -348,9 +374,10 @@ fn translate_deepl(
     ensure_network_enabled(config)?;
     let key = secrets::get("deepl")?;
     let endpoint = "https://api-free.deepl.com/v2/translate";
+    let target_lang = deepl_target_lang(&request.target_lang);
     let mut form = vec![
         ("text", request.text.as_str()),
-        ("target_lang", request.target_lang.as_str()),
+        ("target_lang", target_lang.as_str()),
     ];
     if request.source_lang != "auto" {
         form.push(("source_lang", request.source_lang.as_str()));
@@ -371,11 +398,16 @@ fn translate_deepl(
         .pointer("/translations/0/text")
         .and_then(Value::as_str)
         .ok_or_else(|| "DeepL response did not contain a translation".to_string())?;
+    let detected_source_lang = value
+        .pointer("/translations/0/detected_source_language")
+        .and_then(Value::as_str)
+        .map(normalize_detected_lang);
 
     Ok(TranslationResponse {
         translated_text: translated.to_string(),
         provider_label: "DeepL API".into(),
         warning: Some("Text was sent to DeepL because the DeepL profile is selected.".into()),
+        detected_source_lang,
     })
 }
 
@@ -411,11 +443,16 @@ fn translate_google(
         .pointer("/data/translations/0/translatedText")
         .and_then(Value::as_str)
         .ok_or_else(|| "Google response did not contain a translation".to_string())?;
+    let detected_source_lang = value
+        .pointer("/data/translations/0/detectedSourceLanguage")
+        .and_then(Value::as_str)
+        .map(normalize_detected_lang);
 
     Ok(TranslationResponse {
         translated_text: translated.to_string(),
         provider_label: "Google Cloud Translate".into(),
         warning: Some("Text was sent to Google because the Google profile is selected.".into()),
+        detected_source_lang,
     })
 }
 
@@ -455,11 +492,16 @@ fn translate_yandex(
         .ok_or_else(|| {
             "Yandex Cloud Translate response did not contain a translation".to_string()
         })?;
+    let detected_source_lang = value
+        .pointer("/translations/0/detectedLanguageCode")
+        .and_then(Value::as_str)
+        .map(normalize_detected_lang);
 
     Ok(TranslationResponse {
         translated_text: translated.to_string(),
         provider_label: "Yandex Cloud Translate".into(),
         warning: Some("Text was sent to Yandex because the Yandex profile is selected.".into()),
+        detected_source_lang,
     })
 }
 

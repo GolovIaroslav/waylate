@@ -210,6 +210,7 @@
   let tab: "translate" | "settings" | "history" = "translate";
   let sourceText = "";
   let translatedText = "";
+  let detectedSourceLang: string | null = null;
   let status = "";
   let error = "";
   let translating = false;
@@ -1110,7 +1111,12 @@
     }
     translating = true;
     try {
-      const response = await invoke<{ translatedText: string; providerLabel: string; warning?: string }>(
+      const response = await invoke<{
+        translatedText: string;
+        providerLabel: string;
+        warning?: string;
+        detectedSourceLang?: string | null;
+      }>(
         "translate_text",
         {
           request: {
@@ -1123,6 +1129,7 @@
       );
       translatedText = response.translatedText;
       status = response.warning ?? t("translationReady");
+      detectedSourceLang = config.sourceLang === "auto" ? response.detectedSourceLang ?? null : null;
       await refresh();
     } catch (err) {
       error = friendlyErrorMessage(err);
@@ -1159,20 +1166,26 @@
     }
   }
 
-  function swapLanguages() {
-    if (!config || config.sourceLang === "auto") return;
+  async function swapLanguages() {
+    if (!config) return;
+    // "auto" itself can't become a target language, so swap using the language DeepL/Google/
+    // Yandex actually detected for the last translation instead.
+    const currentSource = config.sourceLang === "auto" ? detectedSourceLang : config.sourceLang;
+    if (!currentSource) return;
     const nextSource = config.targetLang;
-    config.targetLang = config.sourceLang;
+    config.targetLang = currentSource;
     config.sourceLang = nextSource;
+    detectedSourceLang = null;
     if (translatedText.trim()) {
-      const oldSource = sourceText;
       sourceText = translatedText;
-      translatedText = oldSource;
+      translatedText = "";
+      await translate();
     }
   }
 
   function changeModel(modelId: string) {
     if (!config || !snapshot) return;
+    detectedSourceLang = null;
     const nextModel = modelProfiles.find((model) => model.id === modelId)
       ?? snapshot.catalog.find((model) => model.id === modelId);
     if (!nextModel) return;
@@ -1386,10 +1399,11 @@
     if (snapshot) await reveal(snapshot.paths.modelsDir);
   }
 
-  function selectLanguage(kind: "source" | "target", code: string) {
+  async function selectLanguage(kind: "source" | "target", code: string) {
     if (!config) return;
     if (kind === "source") {
       config.sourceLang = code;
+      detectedSourceLang = null;
       sourceLanguageQuery = "";
       sourceLanguageOpen = false;
     } else {
@@ -1398,6 +1412,9 @@
       targetLanguageOpen = false;
     }
     pushRecentLang(code);
+    if (sourceText.trim()) {
+      await translate();
+    }
   }
 
   // Remember the last 5 distinct languages the user picked (excluding auto-detect), most
@@ -1953,7 +1970,7 @@
         <section class="translate-view">
           <section class="toolbar" aria-label="Translation options">
             <label>
-              {t("model")}
+              <span class="visually-hidden">{t("model")}</span>
               {#if selectableModels.length}
                 <select value={config.modelId} on:change={(event) => changeModel(event.currentTarget.value)}>
                   {#if networkSelectableModels.length}
@@ -1980,10 +1997,12 @@
               {/if}
             </label>
             <label class="combo-label">
-              {t("from")}
+              <span class="visually-hidden">{t("from")}</span>
               <div class="combo">
                 <button type="button" class="combo-button" on:click={() => (sourceLanguageOpen = !sourceLanguageOpen)}>
-                  <span>{languageLabel(config.sourceLang)}</span>
+                  <span>
+                    {languageLabel(config.sourceLang)}{config.sourceLang === "auto" && detectedSourceLang ? ` · ${languageLabel(detectedSourceLang)}` : ""}
+                  </span>
                   <ChevronDown size={14} />
                 </button>
                 {#if sourceLanguageOpen}
@@ -2009,11 +2028,11 @@
                 {/if}
               </div>
             </label>
-            <button class="icon" title={t("swapLanguages")} on:click={swapLanguages} disabled={config.sourceLang === "auto"}>
+            <button class="icon" title={t("swapLanguages")} on:click={swapLanguages} disabled={config.sourceLang === "auto" && !detectedSourceLang}>
               <Repeat2 size={15} />
             </button>
             <label class="combo-label">
-              {t("to")}
+              <span class="visually-hidden">{t("to")}</span>
               <div class="combo">
                 <button type="button" class="combo-button" on:click={() => (targetLanguageOpen = !targetLanguageOpen)}>
                   <span>{languageLabel(config.targetLang)}</span>
@@ -2043,7 +2062,8 @@
               </div>
             </label>
             <button class="primary run" on:click={translate} disabled={!canTranslateNow}>
-              <span class:spin={translating}><RefreshCw size={15} /></span> {t("translate")}
+              <span class:spin={translating}><RefreshCw size={15} /></span>
+              <span class="run-label">{t("translate")}</span>
             </button>
             <button class="icon" title={t("unloadModel")} aria-label={t("unloadModel")} on:click={unloadModels} disabled={unloadingModels}>
               <Power size={15} />
@@ -2057,10 +2077,7 @@
 
           <section class="translate-grid">
             <div class="pane">
-              <div class="pane-head">
-                <span>{t("source")}</span>
-              </div>
-              <textarea bind:value={sourceText} spellcheck="false" placeholder={t("sourcePlaceholder")}></textarea>
+              <textarea aria-label={t("source")} bind:value={sourceText} spellcheck="false" placeholder={t("sourcePlaceholder")}></textarea>
               <div class="pane-actions">
                 <button class="icon small" title={t("readSelection")} aria-label={t("readSelection")} on:click={pasteSelection}>
                   <Languages size={13} />
@@ -2071,10 +2088,7 @@
               </div>
             </div>
             <div class="pane">
-              <div class="pane-head">
-                <span>{t("translation")}</span>
-              </div>
-              <textarea bind:value={translatedText} spellcheck="false" readonly placeholder={t("translationPlaceholder")}></textarea>
+              <textarea aria-label={t("translation")} bind:value={translatedText} spellcheck="false" readonly placeholder={t("translationPlaceholder")}></textarea>
               <div class="pane-actions end">
                 <button class="icon small" title={t("copyTranslation")} aria-label={t("copyTranslation")} on:click={copyTranslation} disabled={!translatedText.trim()}>
                   <Copy size={13} />
@@ -2084,11 +2098,13 @@
           </section>
 
           <section class="translate-footer">
-            <div class="footer-bar">
-              {#if status || error}
-                <p class:error-note={Boolean(error)} class="inline-note">{error || status}</p>
+            <div class="footer-bar" class:minimal={footerCollapsed && !error}>
+              {#if error}
+                <p class="inline-note error-note">{error}</p>
+              {:else if !footerCollapsed}
+                <p class="inline-note">{status || (selectableModels.length && selectedModel ? selectedModel.name : "")}</p>
               {:else}
-                <span class="inline-note muted-note">{selectableModels.length && selectedModel ? selectedModel.name : ""}</span>
+                <span class="inline-note"></span>
               {/if}
               <button type="button" class="icon small footer-toggle" class:open={!footerCollapsed} title={t("footerToggle")} aria-label={t("footerToggle")} on:click={toggleFooter}>
                 <ChevronDown size={14} />
@@ -2656,7 +2672,7 @@
 
   .rail {
     width: 44px;
-    margin: 12px 0 12px 12px;
+    margin: 8px 0 8px 8px;
     padding: 10px 6px;
     display: grid;
     grid-template-rows: 32px 1fr;
@@ -2722,7 +2738,7 @@
     display: grid;
     grid-template-rows: minmax(0, 1fr);
     overflow: hidden;
-    padding: 12px 12px 12px 8px;
+    padding: 6px 6px 6px 4px;
   }
 
   .translate-view {
@@ -2733,15 +2749,55 @@
   }
 
   .toolbar {
-    min-height: 52px;
-    padding: 8px 12px 10px;
-    display: grid;
-    grid-template-columns: minmax(150px, 1.5fr) minmax(120px, 1fr) 30px minmax(120px, 1fr) auto auto auto;
-    gap: 8px;
+    min-height: 36px;
+    padding: 5px 8px 6px;
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 6px;
     align-items: end;
     border: 1px solid var(--border);
     border-radius: 8px 8px 0 0;
     background: var(--surface-soft);
+  }
+
+  .toolbar > label {
+    flex: 1 1 0;
+    min-width: 56px;
+  }
+
+  .toolbar > label.combo-label {
+    flex: 1.6 1 0;
+    min-width: 70px;
+  }
+
+  .toolbar > label select,
+  .toolbar > label .combo,
+  .toolbar > label .combo-button {
+    min-width: 0;
+  }
+
+  .run-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .toolbar > button,
+  .toolbar > .zoom-controls {
+    flex: 0 0 auto;
+  }
+
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 
   label {
@@ -2902,7 +2958,7 @@
     min-height: 0;
     height: 100%;
     resize: none;
-    padding: 10px;
+    padding: 8px;
     line-height: 1.45;
   }
 
@@ -2940,10 +2996,10 @@
 
   .translate-grid {
     min-height: 0;
-    padding: 10px 0 0;
+    padding: 6px 0 0;
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 10px;
+    gap: 6px;
     overflow: hidden;
   }
 
@@ -2951,23 +3007,12 @@
     min-width: 0;
     min-height: 0;
     display: grid;
-    grid-template-rows: 24px minmax(0, 1fr) 28px;
-    gap: 6px;
-    padding: 10px 12px 12px;
+    grid-template-rows: minmax(0, 1fr) 26px;
+    gap: 4px;
+    padding: 4px 6px 6px;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--surface);
-  }
-
-  .pane-head {
-    min-height: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    color: var(--text);
-    font-size: 13px;
-    font-weight: 700;
   }
 
   .pane-actions,
@@ -2978,7 +3023,7 @@
   }
 
   .translate-footer {
-    padding: 10px 0 0;
+    padding: 8px 0 0;
     display: grid;
     gap: 8px;
   }
@@ -2988,6 +3033,12 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
+    min-height: 18px;
+  }
+
+  .footer-bar.minimal {
+    min-height: 10px;
+    opacity: 0.45;
   }
 
   .footer-bar .inline-note {
@@ -2997,10 +3048,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .muted-note {
-    color: var(--muted);
+    font-size: 11px;
   }
 
   .footer-toggle :global(svg) {
@@ -3543,7 +3591,6 @@
     }
 
     .shell,
-    .toolbar,
     .translate-grid,
     .settings-grid {
       grid-template-columns: 1fr;
