@@ -13,3 +13,5 @@ vite.config.ts.timestamp-*
 # Local-only working notes / AI session files — never commit
 CLAUDE.md
 NEXT_SESSION.md
+.claude/
+docs/fix-sessions.md
