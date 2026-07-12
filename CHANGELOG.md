@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.6
+
+- Replace the 16-language DeepL/Google/Yandex shortlist with DeepL's real ~30-language catalog and a much broader Google/Yandex list covering all major world regions, not just Europe/EN/RU.
+- Fix DeepL translation to English or Portuguese, which required a regional target variant (EN-GB/EN-US, PT-PT/PT-BR) that the app never sent.
+- Surface the detected source language in the UI when translating with `auto` source on a network provider.
+- Fix autostart on login: use the running binary's absolute path in the `.desktop` entry instead of a bare `waylate` command, which failed under a minimal login PATH.
+
 ## 0.1.5
 
 - Reposition Waylate as an API-key translator first (DeepL, Google, Yandex), with local models as an offline/privacy option, in the README and package metadata.
