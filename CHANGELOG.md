@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.7 (2026-10-27)
+
+- Add an opt-in, free online word dictionary showing multiple meanings, examples,
+  per-sense translations and synonyms after translating a single word.
+- Track whether a word has been looked up before, even when full translation
+  history is disabled. Store saved vocabulary locally with removal and JSON,
+  CSV and TSV exports.
+- Localize dictionary settings, feedback and vocabulary in English, Russian and
+  Slovak; show FreeDictionaryAPI and Wiktionary attribution.
+- Let the main translation toolbar wrap under increased zoom instead of
+  clipping language controls and buttons.
+- Fix a double slash in the dictionary API path found during the manual live
+  test; add a failing-then-passing URL regression test.
+- Preserve existing configuration and autostart; dictionary is off by default.
+
 ## 0.1.6
 
 - Replace the 16-language DeepL/Google/Yandex shortlist with DeepL's real ~30-language catalog and a much broader Google/Yandex list covering all major world regions, not just Europe/EN/RU.

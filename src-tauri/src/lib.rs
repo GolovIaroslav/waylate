@@ -1,6 +1,7 @@
 mod autostart;
 mod clipboard;
 mod config;
+mod dictionary;
 mod engines;
 mod gpu_runtime;
 mod history;
@@ -1989,6 +1990,11 @@ pub fn run() {
             get_history,
             clear_history,
             delete_history_entry,
+            dictionary::dictionary_word_status,
+            dictionary::lookup_dictionary_word,
+            dictionary::save_vocabulary_word,
+            dictionary::list_vocabulary,
+            dictionary::export_vocabulary,
             reveal_path,
             read_runtime_log,
             download_catalog_model,

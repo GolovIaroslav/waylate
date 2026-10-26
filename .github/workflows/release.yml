@@ -66,7 +66,7 @@ jobs:
           body: |
             ## Install
 
-            Download `Waylate-${{ github.ref_name }}-x86_64.AppImage`, mark it executable, run:
+            Download the `Waylate-*-x86_64.AppImage` asset, mark it executable, run:
 
             ```bash
             chmod +x Waylate-*-x86_64.AppImage
