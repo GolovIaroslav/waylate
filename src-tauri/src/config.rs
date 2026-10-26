@@ -20,6 +20,7 @@ pub struct AppConfig {
     pub source_lang: String,
     pub target_lang: String,
     pub history_enabled: bool,
+    pub dictionary_enabled: bool,
     pub autostart: bool,
     pub local_model_policy: String,
     pub local_model_idle_timeout_secs: u64,
@@ -52,6 +53,7 @@ impl Default for AppConfig {
             source_lang: "auto".into(),
             target_lang: "eng_Latn".into(),
             history_enabled: false,
+            dictionary_enabled: false,
             autostart: true,
             local_model_policy: "balanced".into(),
             local_model_idle_timeout_secs: 600,
@@ -191,6 +193,7 @@ mod tests {
         assert_eq!(config.model_id, "nllb-200-distilled-600m-onnx");
         assert_eq!(config.target_lang, "eng_Latn");
         assert!(!config.history_enabled);
+        assert!(!config.dictionary_enabled);
         assert!(!config.api_provider_enabled);
         assert_eq!(config.local_model_policy, "balanced");
         assert_eq!(config.local_model_idle_timeout_secs, 600);
@@ -208,6 +211,7 @@ mod tests {
         assert_eq!(config.local_model_policy, "balanced");
         assert_eq!(config.custom_backend_mode, "external-openai");
         assert!(config.installed_models.is_empty());
+        assert!(!config.dictionary_enabled);
     }
 
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -233,6 +237,7 @@ mod tests {
         let mut config = AppConfig::default();
         config.target_lang = "ru".into();
         config.history_enabled = true;
+        config.dictionary_enabled = true;
         config.local_context_size = 8192;
         config.vulkan_gpu_enabled = true;
         save(&paths, &config).expect("save");
@@ -240,6 +245,7 @@ mod tests {
         let loaded = load(&paths).expect("load");
         assert_eq!(loaded.target_lang, "ru");
         assert!(loaded.history_enabled);
+        assert!(loaded.dictionary_enabled);
         assert_eq!(loaded.local_context_size, 8192);
         assert!(loaded.vulkan_gpu_enabled);
         let _ = std::fs::remove_dir_all(&paths.config_dir.parent().unwrap());

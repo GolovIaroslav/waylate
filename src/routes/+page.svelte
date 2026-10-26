@@ -23,6 +23,7 @@
     ZoomIn,
     ZoomOut,
   } from "@lucide/svelte";
+  import { BookOpen, Bookmark, BookmarkCheck } from "@lucide/svelte";
 
   type ProviderKind =
     | "open-ai-compatible"
@@ -108,6 +109,7 @@
     sourceLang: string;
     targetLang: string;
     historyEnabled: boolean;
+    dictionaryEnabled: boolean;
     autostart: boolean;
     localModelPolicy: string;
     localModelIdleTimeoutSecs: number;
@@ -135,6 +137,34 @@
     modelId: string;
     sourceText: string;
     translatedText: string;
+  };
+
+  type WordStatus = { seenCount: number; saved: boolean };
+  type DictionaryMeaning = {
+    partOfSpeech: string;
+    definition: string;
+    examples: string[];
+    synonyms: string[];
+    translations: string[];
+  };
+  type DictionaryResult = {
+    word: string;
+    language: string;
+    pronunciations: string[];
+    meanings: DictionaryMeaning[];
+    sourceUrl?: string | null;
+    previousLookups: number;
+    saved: boolean;
+  };
+  type VocabularyItem = {
+    word: string;
+    language: string;
+    translation: string;
+    definition: string;
+    example: string;
+    seenCount: number;
+    firstSeen: string;
+    lastSeen: string;
   };
 
   type Snapshot = {
@@ -207,7 +237,7 @@
 
   let snapshot: Snapshot | null = null;
   let config: AppConfig | null = null;
-  let tab: "translate" | "settings" | "history" = "translate";
+  let tab: "translate" | "settings" | "history" | "vocabulary" = "translate";
   let sourceText = "";
   let translatedText = "";
   let detectedSourceLang: string | null = null;
@@ -248,6 +278,16 @@
   let footerCollapsed = false;
   let recentLangs: string[] = [];
   let unloadingModels = false;
+  let dictionaryResult: DictionaryResult | null = null;
+  let dictionaryLoading = false;
+  let dictionaryError = "";
+  let wordStatus: WordStatus | null = null;
+  let vocabulary: VocabularyItem[] = [];
+  let vocabularyError = "";
+  let exportPath = "";
+  let checkedWordKey = "";
+  let dictionaryLookupRequest = 0;
+  let dictionaryTranslatedKey = "";
 
   type SecretProvider = "deepl" | "google" | "yandex" | "openai-compatible";
 
@@ -276,6 +316,19 @@
   $: accelMode = computeAccelMode(snapshot, config);
   $: if (config) applyTheme(config.theme);
   $: if (config && snapshot) scheduleConfigSave();
+  $: singleWord = config?.dictionaryEnabled ? getSingleWord(sourceText) : null;
+  $: wordKey = singleWord && config?.dictionaryEnabled ? `${singleWord.toLocaleLowerCase()}|${config.sourceLang}|${config.targetLang}|${config.modelId}` : "";
+  $: translationWordKey = wordKey;
+  $: if (checkedWordKey !== wordKey) {
+    checkedWordKey = wordKey;
+    wordStatus = null;
+    dictionaryResult = null;
+    dictionaryError = "";
+    dictionaryLoading = false;
+    dictionaryLookupRequest++;
+    if (wordKey && singleWord && config) void checkWordStatus(singleWord, config.sourceLang, wordKey);
+  }
+  $: if (config && !config.dictionaryEnabled && tab === "vocabulary") tab = "settings";
 
   const languageAliases: Record<string, string[]> = {
     auto: ["auto"],
@@ -455,6 +508,11 @@
       ru: "Если включено, переводы сохраняются локально в SQLite. Из-за истории ничего не отправляется в сеть.",
       sk: "Ak je zapnuté, preklady sa ukladajú lokálne do SQLite. História nič neodosiela do siete.",
     },
+    dictionary: {
+      en: "Off by default. For a single word, fetches definitions, examples and translations from FreeDictionaryAPI (Wiktionary). Only the selected word goes online; saved words stay on this computer, separately from translation history.",
+      ru: "По умолчанию выключено. Для одного слова загружает определения, примеры и варианты перевода из FreeDictionaryAPI (Wiktionary). В сеть уходит только выбранное слово; сохранённые слова остаются на компьютере отдельно от истории переводов.",
+      sk: "Predvolene vypnuté. Pri jednom slove načíta definície, príklady a preklady z FreeDictionaryAPI (Wiktionary). Online sa posiela iba vybrané slovo; uložené slová zostanú lokálne oddelene od histórie prekladov.",
+    },
     autostart: {
       en: "Starts Waylate in the background so the tray and shortcut workflow are ready after login.",
       ru: "Запускает Waylate в фоне, чтобы значок в трее и горячие клавиши были готовы после входа в систему.",
@@ -564,6 +622,23 @@
       light: "Light",
       dark: "Dark",
       saveHistory: "Save translation history locally",
+      enableDictionary: "Enable word dictionary (online lookups)",
+      vocabulary: "My vocabulary",
+      wordDetails: "Word meanings",
+      wordFirst: "Not looked up before",
+      wordSeen: "Dictionary lookups: {count}",
+      saveWord: "Add to vocabulary",
+      removeSavedWord: "Remove saved word",
+      dictionaryLoading: "Looking up meanings…",
+      dictionaryUnavailable: "Dictionary unavailable",
+      dictionaryEmpty: "No meanings found for this word.",
+      wordSavingError: "Could not save word",
+      wordTranslations: "Other translations",
+      wordSynonyms: "Synonyms",
+      dictionaryOnlineNote: "Source",
+      vocabEmpty: "No saved words yet. Translate one word and add it here.",
+      vocabExport: "Export vocabulary",
+      vocabExported: "Exported to",
       autostart: "Start Waylate in background",
       networkApis: "Allow network API providers",
       apiKeysNote: "DeepL, Google and Yandex need your own key.",
@@ -721,6 +796,23 @@
       light: "Светлая",
       dark: "Тёмная",
       saveHistory: "Сохранять историю переводов локально",
+      enableDictionary: "Включить словарь (онлайн-поиск слов)",
+      vocabulary: "Мой словарь",
+      wordDetails: "Значения слова",
+      wordFirst: "Ранее не искали в словаре",
+      wordSeen: "Запросов в словаре: {count}",
+      saveWord: "Добавить в словарь",
+      removeSavedWord: "Удалить из словаря",
+      dictionaryLoading: "Ищу значения…",
+      dictionaryUnavailable: "Словарь недоступен",
+      dictionaryEmpty: "Определения для этого слова не найдены.",
+      wordSavingError: "Не удалось сохранить слово",
+      wordTranslations: "Другие переводы",
+      wordSynonyms: "Синонимы",
+      dictionaryOnlineNote: "Источник",
+      vocabEmpty: "Сохранённых слов пока нет. Переведите одно слово и добавьте его сюда.",
+      vocabExport: "Экспорт словаря",
+      vocabExported: "Сохранено в",
       autostart: "Запускать Waylate в фоне",
       networkApis: "Разрешить сетевые API-провайдеры",
       apiKeysNote: "Для DeepL, Google и Yandex нужен Ваш ключ.",
@@ -878,6 +970,23 @@
       light: "Svetlá",
       dark: "Tmavá",
       saveHistory: "Ukladať históriu prekladov lokálne",
+      enableDictionary: "Zapnúť slovník (online vyhľadávanie)",
+      vocabulary: "Môj slovník",
+      wordDetails: "Významy slova",
+      wordFirst: "Zatiaľ nevyhľadané v slovníku",
+      wordSeen: "Vyhľadania v slovníku: {count}",
+      saveWord: "Pridať do slovníka",
+      removeSavedWord: "Odstrániť zo slovníka",
+      dictionaryLoading: "Načítavam významy…",
+      dictionaryUnavailable: "Slovník nie je dostupný",
+      dictionaryEmpty: "Pre toto slovo sa nenašli definície.",
+      wordSavingError: "Slovo sa nepodarilo uložiť",
+      wordTranslations: "Ďalšie preklady",
+      wordSynonyms: "Synonymá",
+      dictionaryOnlineNote: "Zdroj",
+      vocabEmpty: "Zatiaľ nemáte uložené slová. Preložte jedno slovo a pridajte ho.",
+      vocabExport: "Export slovníka",
+      vocabExported: "Uložené do",
       autostart: "Spúšťať Waylate na pozadí",
       networkApis: "Povoliť sieťových API providerov",
       apiKeysNote: "DeepL, Google a Yandex potrebujú Váš kľúč.",
@@ -1094,6 +1203,11 @@
 
   async function translate() {
     if (!config) return;
+    const requestedWord = config.dictionaryEnabled ? getSingleWord(sourceText) : null;
+    const requestedSource = config.sourceLang;
+    const requestedTarget = config.targetLang;
+    const requestedModel = config.modelId;
+    dictionaryTranslatedKey = "";
     error = "";
     status = "";
     probeResult = "";
@@ -1131,10 +1245,111 @@
       status = response.warning ?? t("translationReady");
       detectedSourceLang = config.sourceLang === "auto" ? response.detectedSourceLang ?? null : null;
       await refresh();
+      if (requestedWord && config?.dictionaryEnabled && getSingleWord(sourceText) === requestedWord && config.sourceLang === requestedSource && config.targetLang === requestedTarget && config.modelId === requestedModel) {
+        dictionaryTranslatedKey = `${requestedWord.toLocaleLowerCase()}|${requestedSource}|${requestedTarget}|${requestedModel}`;
+        void loadDictionaryDetails(requestedWord, requestedSource === "auto" ? detectedSourceLang || "auto" : requestedSource, requestedTarget, response.translatedText);
+      }
     } catch (err) {
       error = friendlyErrorMessage(err);
     } finally {
       translating = false;
+    }
+  }
+
+  function getSingleWord(text: string): string | null {
+    const word = text.trim();
+    return Array.from(word).length <= 64 && /^[\p{L}](?:[\p{L}\p{M}\p{N}'’-]*[\p{L}])?$/u.test(word)
+      ? word : null;
+  }
+
+  async function checkWordStatus(word: string, language: string, key: string) {
+    try {
+      const result = await invoke<WordStatus>("dictionary_word_status", { word, language });
+      if (wordKey === key && config?.dictionaryEnabled) wordStatus = result;
+    } catch {
+      // A new word or temporarily locked database must never block translation.
+    }
+  }
+
+  async function loadDictionaryDetails(word: string, language: string, targetLang: string, translation: string) {
+    const request = ++dictionaryLookupRequest;
+    dictionaryResult = null;
+    dictionaryError = "";
+    dictionaryLoading = true;
+    try {
+      const result = await invoke<DictionaryResult>("lookup_dictionary_word", { word, language, targetLang, translation });
+      if (request !== dictionaryLookupRequest || !config?.dictionaryEnabled || getSingleWord(sourceText) !== word) return;
+      dictionaryResult = result;
+      wordStatus = { seenCount: result.previousLookups, saved: result.saved };
+    } catch (err) {
+      if (request === dictionaryLookupRequest && config?.dictionaryEnabled) {
+        dictionaryError = `${t("dictionaryUnavailable")}: ${String(err)}`;
+      }
+    } finally {
+      if (request === dictionaryLookupRequest) dictionaryLoading = false;
+    }
+  }
+
+  async function toggleSavedWord() {
+    if (!config?.dictionaryEnabled || !singleWord || !translatedText.trim() || dictionaryTranslatedKey !== translationWordKey) return;
+    const saved = !(dictionaryResult?.saved ?? wordStatus?.saved ?? false);
+    const meaning = dictionaryResult?.meanings[0];
+    try {
+      await invoke("save_vocabulary_word", {
+        word: singleWord,
+        language: dictionaryResult?.language ?? (config.sourceLang === "auto" ? detectedSourceLang || "auto" : config.sourceLang),
+        translation: translatedText,
+        definition: meaning?.definition ?? "",
+        example: meaning?.examples[0] ?? "",
+        saved,
+      });
+      wordStatus = { seenCount: wordStatus?.seenCount ?? 0, saved };
+      if (dictionaryResult) dictionaryResult = { ...dictionaryResult, saved };
+      await loadVocabulary();
+    } catch (err) {
+      dictionaryError = `${t("wordSavingError")}: ${String(err)}`;
+    }
+  }
+
+  async function loadVocabulary() {
+    if (!config?.dictionaryEnabled) return;
+    try {
+      vocabulary = await invoke<VocabularyItem[]>("list_vocabulary");
+      vocabularyError = "";
+    } catch (err) {
+      vocabularyError = String(err);
+    }
+  }
+
+  function openVocabulary() {
+    tab = "vocabulary";
+    exportPath = "";
+    void loadVocabulary();
+  }
+
+  async function removeVocabularyWord(item: VocabularyItem) {
+    try {
+      await invoke("save_vocabulary_word", {
+        word: item.word, language: item.language, translation: "", definition: "", example: "", saved: false,
+      });
+      if (dictionaryResult?.word.toLocaleLowerCase() === item.word.toLocaleLowerCase() && dictionaryResult.language === item.language) {
+        dictionaryResult = { ...dictionaryResult, saved: false };
+      }
+      if (singleWord?.toLocaleLowerCase() === item.word.toLocaleLowerCase()) {
+        wordStatus = { seenCount: wordStatus?.seenCount ?? item.seenCount, saved: false };
+      }
+      await loadVocabulary();
+    } catch (err) {
+      vocabularyError = String(err);
+    }
+  }
+
+  async function exportSavedWords(format: "json" | "csv" | "tsv") {
+    try {
+      exportPath = await invoke<string>("export_vocabulary", { format });
+      vocabularyError = "";
+    } catch (err) {
+      vocabularyError = String(err);
     }
   }
 
@@ -1961,6 +2176,11 @@
       <button class:active={tab === "history"} title={t("history")} aria-label={t("history")} on:click={() => (tab = "history")}>
         <History size={14} />
       </button>
+      {#if config?.dictionaryEnabled}
+        <button class:active={tab === "vocabulary"} title={t("vocabulary")} aria-label={t("vocabulary")} on:click={openVocabulary}>
+          <BookOpen size={14} />
+        </button>
+      {/if}
     </nav>
   </aside>
 
@@ -2096,6 +2316,68 @@
               </div>
             </div>
           </section>
+
+          {#if config.dictionaryEnabled && singleWord}
+            <section class="dictionary-panel" aria-label={t("wordDetails")}>
+              <header class="dictionary-head">
+                <div class="dictionary-title">
+                  <strong>{singleWord}</strong>
+                  {#if wordStatus}
+                    <span class="word-status" aria-live="polite">
+                      {wordStatus.seenCount > 0 ? t("wordSeen").replace("{count}", String(wordStatus.seenCount)) : t("wordFirst")}
+                    </span>
+                  {/if}
+                </div>
+                <button type="button" class="word-save" disabled={!translatedText.trim() || dictionaryTranslatedKey !== translationWordKey} on:click={toggleSavedWord}>
+                  {#if dictionaryResult?.saved ?? wordStatus?.saved}
+                    <BookmarkCheck size={15} /> {t("removeSavedWord")}
+                  {:else}
+                    <Bookmark size={15} /> {t("saveWord")}
+                  {/if}
+                </button>
+              </header>
+              {#if dictionaryLoading}
+                <p class="dictionary-message" role="status">{t("dictionaryLoading")}</p>
+              {:else if dictionaryError}
+                <p class="dictionary-message" role="status">{dictionaryError}</p>
+              {:else if dictionaryResult}
+                {#if dictionaryResult.meanings.length}
+                  <div class="dictionary-meanings">
+                    {#if dictionaryResult.pronunciations.length}
+                      <p class="dictionary-pronunciation">{dictionaryResult.pronunciations.join(" · ")} · {dictionaryResult.language}</p>
+                    {:else}
+                      <p class="dictionary-pronunciation">{dictionaryResult.language}</p>
+                    {/if}
+                    {#each dictionaryResult.meanings as meaning, i}
+                      <div class="dictionary-meaning">
+                        <p><strong>{i + 1}.</strong> <em>{meaning.partOfSpeech}</em> {meaning.definition}</p>
+                        {#if meaning.translations.length}
+                          <p class="meaning-extras"><strong>{t("wordTranslations")}:</strong> {meaning.translations.join(", ")}</p>
+                        {/if}
+                        {#each meaning.examples as example}
+                          <p class="meaning-example">{example}</p>
+                        {/each}
+                        {#if meaning.synonyms.length}
+                          <p class="meaning-extras"><strong>{t("wordSynonyms")}:</strong> {meaning.synonyms.join(", ")}</p>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                {:else}
+                  <p class="dictionary-message">{t("dictionaryEmpty")}</p>
+                {/if}
+              {/if}
+              <div class="dictionary-attribution">
+                <a href="https://freedictionaryapi.com/" target="_blank" rel="noopener noreferrer">FreeDictionaryAPI.com</a>
+                <span>·</span>
+                {#if dictionaryResult?.sourceUrl}
+                  <a href={dictionaryResult.sourceUrl} target="_blank" rel="noopener noreferrer">Wiktionary (CC BY-SA)</a>
+                {:else}
+                  <span>Wiktionary (CC BY-SA)</span>
+                {/if}
+              </div>
+            </section>
+          {/if}
 
           <section class="translate-footer">
             <div class="footer-bar" class:minimal={footerCollapsed && !error}>
@@ -2397,6 +2679,10 @@
               <span>{t("saveHistory")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "history")} on:mouseenter={() => showHelp("history")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "history"}<span class="help-popover">{help("history")}</span>{/if}</button></span>
             </label>
             <label class="check">
+              <input type="checkbox" bind:checked={config.dictionaryEnabled} />
+              <span>{t("enableDictionary")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "dictionary")} on:mouseenter={() => showHelp("dictionary")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "dictionary"}<span class="help-popover">{help("dictionary")}</span>{/if}</button></span>
+            </label>
+            <label class="check">
               <input type="checkbox" bind:checked={config.autostart} />
               <span>{t("autostart")} <button type="button" class="help" on:click={(event) => toggleHelp(event, "autostart")} on:mouseenter={() => showHelp("autostart")} on:mouseleave={scheduleHelpClose}><CircleHelp size={13} />{#if activeHelp === "autostart"}<span class="help-popover">{help("autostart")}</span>{/if}</button></span>
             </label>
@@ -2461,7 +2747,7 @@
             </label>
           </div>
         </section>
-      {:else}
+      {:else if tab === "history"}
         <section class="history-list">
         <div class="history-head">
           <strong>{t("localHistory")}</strong>
@@ -2485,6 +2771,42 @@
             </article>
           {/each}
         {/if}
+        </section>
+      {:else}
+        <section class="vocabulary-list">
+          <div class="vocabulary-header">
+            <strong>{t("vocabulary")}</strong>
+            <div class="vocabulary-export">
+              <span>{t("vocabExport")}</span>
+              <button on:click={() => exportSavedWords("json")} disabled={!vocabulary.length}>JSON</button>
+              <button on:click={() => exportSavedWords("csv")} disabled={!vocabulary.length}>CSV</button>
+              <button on:click={() => exportSavedWords("tsv")} disabled={!vocabulary.length}>TSV</button>
+            </div>
+          </div>
+          {#if exportPath}
+            <p class="inline-note" role="status">{t("vocabExported")}: {exportPath}</p>
+          {/if}
+          {#if vocabularyError}
+            <p class="inline-note error-note" role="alert">{vocabularyError}</p>
+          {:else if !vocabulary.length}
+            <p class="muted">{t("vocabEmpty")}</p>
+          {:else}
+            {#each vocabulary as item (item.language + ":" + item.word)}
+              <article class="vocabulary-word">
+                <div class="history-item-head">
+                  <strong>{item.word} <small>({item.language})</small></strong>
+                  <button class="icon small" title={t("removeSavedWord")} aria-label={t("removeSavedWord")} on:click={() => removeVocabularyWord(item)}>
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+                <p class="vocabulary-translation">{item.translation}</p>
+                {#if item.definition}<p class="muted">{item.definition}</p>{/if}
+                {#if item.example}<p class="word-example">{item.example}</p>{/if}
+                <small class="word-counter">{t("wordSeen").replace("{count}", String(item.seenCount))}</small>
+              </article>
+            {/each}
+          {/if}
+          <p class="dictionary-license">{t("dictionaryOnlineNote")}: <a href="https://freedictionaryapi.com/" target="_blank" rel="noopener noreferrer">FreeDictionaryAPI.com</a> · Wiktionary (CC BY-SA).</p>
         </section>
       {/if}
     {:else}
@@ -2598,7 +2920,7 @@
 
   :global(body) {
     margin: 0;
-    min-width: 840px;
+    min-width: 0;
     color: var(--text);
     background: var(--bg);
     font-family:
@@ -2634,6 +2956,15 @@
   button:disabled {
     cursor: default;
     opacity: 0.55;
+  }
+
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  a:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
   }
 
   .primary {
@@ -2744,7 +3075,7 @@
   .translate-view {
     min-height: 0;
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
     overflow: hidden;
   }
 
@@ -2752,22 +3083,22 @@
     min-height: 36px;
     padding: 5px 8px 6px;
     display: flex;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
     gap: 6px;
-    align-items: end;
+    align-items: center;
     border: 1px solid var(--border);
     border-radius: 8px 8px 0 0;
     background: var(--surface-soft);
   }
 
   .toolbar > label {
-    flex: 1 1 0;
-    min-width: 56px;
+    flex: 1 1 105px;
+    min-width: 105px;
   }
 
   .toolbar > label.combo-label {
-    flex: 1.6 1 0;
-    min-width: 70px;
+    flex: 1.6 1 124px;
+    min-width: 124px;
   }
 
   .toolbar > label select,
@@ -2986,6 +3317,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
+    margin-left: auto;
   }
 
   .zoom-value {
@@ -3020,6 +3352,135 @@
     display: flex;
     gap: 6px;
     align-items: center;
+  }
+
+  .dictionary-panel {
+    min-height: 0;
+    max-height: min(32vh, 250px);
+    margin-top: 8px;
+    padding: 8px 10px;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    gap: 6px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+  }
+
+  .dictionary-head,
+  .dictionary-title,
+  .dictionary-attribution,
+  .vocabulary-header,
+  .vocabulary-export {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .dictionary-head,
+  .vocabulary-header {
+    justify-content: space-between;
+  }
+
+  .dictionary-title strong {
+    font-size: 14px;
+  }
+
+  .word-status,
+  .dictionary-pronunciation,
+  .dictionary-attribution,
+  .dictionary-license,
+  .word-counter {
+    color: var(--muted-text);
+    font-size: 12px;
+  }
+
+  .word-save {
+    min-height: 28px;
+    font-size: 12px;
+  }
+
+  .dictionary-meanings {
+    min-height: 0;
+    overflow: auto;
+    padding-right: 5px;
+  }
+
+  .dictionary-meaning {
+    padding: 7px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .dictionary-meaning:last-child {
+    border-bottom: 0;
+  }
+
+  .dictionary-meaning p {
+    margin: 3px 0;
+    font-size: 12px;
+    line-height: 1.45;
+  }
+
+  .dictionary-meaning em,
+  .meaning-extras {
+    color: var(--muted-text);
+  }
+
+  .dictionary-meaning .meaning-example {
+    padding-left: 10px;
+    border-left: 2px solid var(--primary);
+  }
+
+  .dictionary-pronunciation,
+  .dictionary-message {
+    margin: 2px 0 4px;
+  }
+
+  .dictionary-attribution {
+    padding-top: 4px;
+    border-top: 1px solid var(--border);
+  }
+
+  .dictionary-attribution a,
+  .dictionary-license a {
+    color: var(--text);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .vocabulary-list {
+    min-height: 0;
+    overflow: auto;
+    padding: 12px;
+    display: grid;
+    gap: 10px;
+    align-content: start;
+  }
+
+  .vocabulary-export {
+    font-size: 12px;
+  }
+
+  .vocabulary-export button {
+    min-height: 28px;
+  }
+
+  .vocabulary-word {
+    gap: 5px;
+  }
+
+  .vocabulary-word small {
+    font-weight: 400;
+  }
+
+  .vocabulary-word .vocabulary-translation {
+    font-weight: 600;
+  }
+
+  .vocabulary-word .word-example {
+    color: var(--muted-text);
+    font-style: italic;
   }
 
   .translate-footer {
