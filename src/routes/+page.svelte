@@ -317,8 +317,8 @@
   $: if (config) applyTheme(config.theme);
   $: if (config && snapshot) scheduleConfigSave();
   $: singleWord = config?.dictionaryEnabled ? getSingleWord(sourceText) : null;
-  $: wordKey = singleWord && config?.dictionaryEnabled ? `${singleWord.toLocaleLowerCase()}|${config.sourceLang}` : "";
-  $: translationWordKey = wordKey && config ? `${wordKey}|${config.targetLang}|${config.modelId}` : "";
+  $: wordKey = singleWord && config?.dictionaryEnabled ? `${singleWord.toLocaleLowerCase()}|${config.sourceLang}|${config.targetLang}|${config.modelId}` : "";
+  $: translationWordKey = wordKey;
   $: if (checkedWordKey !== wordKey) {
     checkedWordKey = wordKey;
     wordStatus = null;
@@ -1245,7 +1245,7 @@
       status = response.warning ?? t("translationReady");
       detectedSourceLang = config.sourceLang === "auto" ? response.detectedSourceLang ?? null : null;
       await refresh();
-      if (requestedWord && config?.dictionaryEnabled && getSingleWord(sourceText) === requestedWord) {
+      if (requestedWord && config?.dictionaryEnabled && getSingleWord(sourceText) === requestedWord && config.sourceLang === requestedSource && config.targetLang === requestedTarget && config.modelId === requestedModel) {
         dictionaryTranslatedKey = `${requestedWord.toLocaleLowerCase()}|${requestedSource}|${requestedTarget}|${requestedModel}`;
         void loadDictionaryDetails(requestedWord, requestedSource === "auto" ? detectedSourceLang || "auto" : requestedSource, requestedTarget, response.translatedText);
       }
