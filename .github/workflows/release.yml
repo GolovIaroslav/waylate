@@ -48,7 +48,7 @@ jobs:
           DEST="dist/Waylate-${VERSION}-x86_64.AppImage"
           mkdir -p dist
           cp "$SRC" "$DEST"
-          sha256sum "$DEST" > "${DEST}.sha256"
+          (cd dist && sha256sum "Waylate-${VERSION}-x86_64.AppImage" > "Waylate-${VERSION}-x86_64.AppImage.sha256")
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
