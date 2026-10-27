@@ -296,19 +296,26 @@
   let checkedWordKey = "";
   let dictionaryLookupRequest = 0;
   let dictionaryTranslatedKey = "";
+  type AiTurn = {
+    question: string;
+    prompt: string;
+    answer: string;
+    reasoning: string | null;
+    truncated: boolean;
+  };
+  const AI_EXPLANATION = "Briefly explain the source text's meaning and usage. Include an example only if useful.";
   let aiQuestion = "";
-  let aiUseContext = true;
-  let aiAnswer = "";
-  let aiReasoning: string | null = null;
-  let aiAnswerTruncated = false;
+  let aiChats: Record<string, AiTurn[]> = {};
+  let aiPending: Record<string, boolean> = {};
+  let aiChatErrors: Record<string, string> = {};
+  let aiContextKey = "";
+  let aiPreviousContextKey = "";
+  let visibleAiTurns: AiTurn[] = [];
   let aiManualModelEntry = true;
-  let aiError = "";
-  let aiLoading = false;
   let aiModels: string[] = [];
   let aiKey = "";
   let aiTestStatus = "";
   let aiModelLoading = false;
-  let aiRequestSequence = 0;
 
 
   type SecretProvider = "deepl" | "google" | "yandex" | "openai-compatible" | "ai-assistant";
@@ -328,6 +335,18 @@
   $: canTranslateNow = !translating && !testing && selectableModels.length > 0;
   $: if (config && selectableModels.length && !selectableModels.find((m) => m.id === config?.modelId)) {
     changeModel(selectableModels[0].id);
+  }
+  $: aiContextKey = JSON.stringify([
+    sourceText.trim(),
+    config?.sourceLang ?? "",
+    config?.targetLang ?? "",
+    config?.assistantBaseUrl ?? "",
+    config?.assistantModel ?? "",
+  ]);
+  $: visibleAiTurns = aiChats[aiContextKey] ?? [];
+  $: if (aiContextKey !== aiPreviousContextKey) {
+    aiPreviousContextKey = aiContextKey;
+    aiQuestion = "";
   }
   $: uiLang = config?.uiLanguage === "ru" || config?.uiLanguage === "sk" ? config.uiLanguage : "en";
   // Decide which acceleration banner to show on the translate view:
@@ -614,10 +633,11 @@
       aiNoModels: "No models returned — enter an ID manually",
       aiPrompt: "System prompt ({target_language} inserts the answer language)",
       aiResetPrompt: "Reset prompt",
-      aiQuestion: "Your question",
-      aiUseContext: "Include source text as context",
-      aiQuestionHint: "Ask about a word, meaning, usage, or anything else",
-      aiContextHint: "The current source text is sent as context only when you press Ask.",
+      aiQuestion: "Question or follow-up (optional)",
+      aiQuestionHint: "Ask a question or leave empty for an explanation",
+      aiContextHint: "Source text is always included.",
+      aiExplain: "Explain text",
+      aiAutoExplain: "Explanation",
       aiSend: "Ask",
       aiSending: "Asking...",
       aiAnswer: "AI answer",
@@ -826,10 +846,11 @@
       aiNoModels: "Список пуст — введите ID вручную",
       aiPrompt: "Системный промпт ({target_language} — язык ответа)",
       aiResetPrompt: "Сбросить промпт",
-      aiQuestion: "Ваш вопрос",
-      aiUseContext: "Использовать исходный текст как контекст",
-      aiQuestionHint: "Спросите о слове, значении, употреблении или о чём угодно",
-      aiContextHint: "Текущий исходный текст отправляется как контекст только после нажатия кнопки.",
+      aiQuestion: "Вопрос или уточнение (необязательно)",
+      aiQuestionHint: "Напишите вопрос или оставьте пустым для объяснения текста",
+      aiContextHint: "Исходный текст всегда учитывается.",
+      aiExplain: "Объяснить текст",
+      aiAutoExplain: "Объяснение",
       aiSend: "Спросить",
       aiSending: "Ожидание...",
       aiAnswer: "Ответ ИИ",
@@ -1038,10 +1059,11 @@
       aiNoModels: "Žiadne modely — zadajte ID ručne",
       aiPrompt: "Systémový prompt ({target_language} určuje jazyk odpovede)",
       aiResetPrompt: "Obnoviť prompt",
-      aiQuestion: "Vaša otázka",
-      aiUseContext: "Použiť zdrojový text ako kontext",
-      aiQuestionHint: "Opýtajte sa na slovo, význam, použitie alebo čokoľvek iné",
-      aiContextHint: "Aktuálny text sa odošle ako kontext až po kliknutí na tlačidlo.",
+      aiQuestion: "Otázka alebo doplnenie (nepovinné)",
+      aiQuestionHint: "Zadajte otázku alebo nechajte prázdne na vysvetlenie",
+      aiContextHint: "Zdrojový text sa vždy používa.",
+      aiExplain: "Vysvetliť text",
+      aiAutoExplain: "Vysvetlenie",
       aiSend: "Opýtať sa",
       aiSending: "Čakám...",
       aiAnswer: "Odpoveď AI",
@@ -1632,11 +1654,6 @@
     }
     aiManualModelEntry = false;
     config.assistantModel = id;
-    aiRequestSequence++;
-    aiLoading = false;
-    aiAnswer = "";
-    aiReasoning = null;
-    aiAnswerTruncated = false;
   }
 
   async function testAiConnection() {
@@ -1660,34 +1677,57 @@
     }
   }
 
+  function storeAiTurn(key: string, turn: AiTurn) {
+    const next = { ...aiChats };
+    const turns = (next[key] ?? []).concat(turn).slice(-6);
+    delete next[key];
+    next[key] = turns;
+    while (Object.keys(next).length > 20) {
+      delete next[Object.keys(next)[0]];
+    }
+    aiChats = next;
+  }
+
   async function askAi() {
-    if (!config?.assistantEnabled || aiLoading || !aiQuestion.trim()) return;
-    aiLoading = true;
-    aiError = "";
-    aiAnswer = "";
-    aiReasoning = null;
-    aiAnswerTruncated = false;
-    const currentRequest = ++aiRequestSequence;
-    const targetLanguage = languageLabel(config.targetLang);
+    if (!config?.assistantEnabled || !config.assistantModel.trim()) return;
+    const key = aiContextKey;
+    const context = sourceText;
+    const question = aiQuestion.trim();
+    const existing = [...(aiChats[key] ?? [])];
+    if (aiPending[key] || (!question && (!context.trim() || existing.length))) return;
+    const prompt = question || AI_EXPLANATION;
+    const history = existing.flatMap((turn) => [
+      { role: "user", content: turn.prompt },
+      { role: "assistant", content: turn.answer.slice(0, 12000) },
+    ]);
+    aiPending = { ...aiPending, [key]: true };
+    aiChatErrors = { ...aiChatErrors, [key]: "" };
     try {
       await persistConfig(false);
       const response = await invoke<{ text: string; reasoning?: string | null; truncated: boolean }>("assistant_ask", {
-        request: { question: aiQuestion, context: aiUseContext ? sourceText : "", targetLanguage },
+        request: { question, context, targetLanguage: languageLabel(config.targetLang), history },
       });
-      if (currentRequest === aiRequestSequence && config?.assistantEnabled) {
-        aiAnswer = response.text;
-        aiReasoning = response.reasoning ?? null;
-        aiAnswerTruncated = response.truncated;
+      if (response.text.trim()) {
+        storeAiTurn(key, {
+          question,
+          prompt,
+          answer: response.text,
+          reasoning: response.reasoning ?? null,
+          truncated: response.truncated,
+        });
+        if (aiContextKey === key && aiQuestion.trim() === question) aiQuestion = "";
       }
     } catch (err) {
-      if (currentRequest === aiRequestSequence && config?.assistantEnabled) aiError = String(err);
+      aiChatErrors = { ...aiChatErrors, [key]: String(err) };
     } finally {
-      if (currentRequest === aiRequestSequence) aiLoading = false;
+      const pending = { ...aiPending };
+      delete pending[key];
+      aiPending = pending;
     }
   }
 
   function resetAiPrompt() {
-    if (config) config.assistantSystemPrompt = "You help people learn foreign languages. Explain vocabulary, usage, nuances and examples clearly. Answer in {target_language} unless the user explicitly requests otherwise.";
+    if (config) config.assistantSystemPrompt = "You are a concise language-learning assistant. Explain the source text and answer questions in {target_language}, unless asked otherwise. Use plain text only: no Markdown, headings, bullet lists, tables or code fences. Usually answer in 2-4 short sentences; provide examples only when useful. For follow-ups, answer directly without repeating earlier explanations. Expand only when asked for detail.";
   }
 
   async function unloadModels() {
@@ -2521,6 +2561,7 @@
               <button class="zoom-value" title="Reset zoom" on:click={() => setUiScale(1)}>{Math.round(uiScale * 100)}%</button>
               <button class="icon small" title="Zoom in" aria-label="Zoom in" on:click={() => setUiScale(uiScale + 0.1)}><ZoomIn size={13} /></button>
             </div>
+            {#if error}<p class="toolbar-error error-note" role="alert">{error}</p>{/if}
           </section>
 
           <section class="translate-grid">
@@ -2561,27 +2602,37 @@
                 </label>
                 <button type="button" disabled={aiModelLoading} on:click={fetchAiModels}>{t("aiFindModels")}</button>
               </div>
-              <label class="ai-question-label">
-                <span class="visually-hidden">{t("aiQuestion")}</span>
-                <textarea rows="2" bind:value={aiQuestion} placeholder={t("aiQuestionHint")}></textarea>
-              </label>
-              <label class="check ai-context"><input type="checkbox" bind:checked={aiUseContext} /><span>{t("aiUseContext")}</span></label>
-              <p class="muted">{t("aiContextHint")}</p>
-              <button type="button" class="primary" disabled={aiLoading || !aiQuestion.trim() || !config.assistantModel.trim()} on:click={askAi}>{aiLoading ? t("aiSending") : t("aiSend")}</button>
-              {#if aiError}<p role="alert" class="inline-note error-note">{aiError}</p>{/if}
-              {#if aiAnswer}
-                <div class="ai-answer" aria-live="polite">
-                  <strong>{t("aiAnswer")}</strong>
-                  <p>{aiAnswer}</p>
-                  {#if aiAnswerTruncated}<p class="inline-note" role="status">{t("aiAnswerTruncated")}</p>{/if}
-                  {#if aiReasoning}
+              {#if aiChatErrors[aiContextKey]}
+                <p role="alert" class="inline-note error-note">{aiChatErrors[aiContextKey]}</p>
+              {/if}
+              {#each visibleAiTurns as turn, i}
+                <div class="ai-answer">
+                  {#if turn.question}<p class="ai-user-question">{turn.question}</p>{/if}
+                  <strong>{i === 0 && !turn.question ? t("aiAutoExplain") : t("aiAnswer")}</strong>
+                  <p>{turn.answer}</p>
+                  {#if turn.truncated}<p class="inline-note" role="status">{t("aiAnswerTruncated")}</p>{/if}
+                  {#if turn.reasoning}
                     <details class="ai-reasoning">
                       <summary>{t("aiReasoningDetails")}</summary>
-                      <p>{aiReasoning}</p>
+                      <p>{turn.reasoning}</p>
                     </details>
                   {/if}
                 </div>
-              {/if}
+              {/each}
+              <div class="ai-composer">
+                <label class="ai-question-label">
+                  <span>{t("aiQuestion")}</span>
+                  <textarea rows="2" maxlength="4000" bind:value={aiQuestion} placeholder={t("aiQuestionHint")}></textarea>
+                </label>
+                <div class="ai-composer-bottom">
+                  <span class="muted">{t("aiContextHint")}</span>
+                  <button type="button" class="primary"
+                    disabled={Boolean(aiPending[aiContextKey]) || !config.assistantModel.trim() || (!aiQuestion.trim() && (!sourceText.trim() || visibleAiTurns.length > 0))}
+                    on:click={askAi}>
+                    {aiPending[aiContextKey] ? t("aiSending") : !aiQuestion.trim() && visibleAiTurns.length === 0 ? t("aiExplain") : t("aiSend")}
+                  </button>
+                </div>
+              </div>
             </details>
           {/if}
 
@@ -2647,19 +2698,16 @@
             </section>
           {/if}
 
+          {#if gpuReadyRestart || accelMode}
           <section class="translate-footer">
-            <div class="footer-bar" class:minimal={footerCollapsed && !error}>
-              {#if error}
-                <p class="inline-note error-note">{error}</p>
-              {:else if !footerCollapsed}
-                <p class="inline-note">{status || (selectableModels.length && selectedModel ? selectedModel.name : "")}</p>
-              {:else}
+            {#if accelMode}
+              <div class="footer-bar" class:minimal={footerCollapsed}>
                 <span class="inline-note"></span>
-              {/if}
-              <button type="button" class="icon small footer-toggle" class:open={!footerCollapsed} title={t("footerToggle")} aria-label={t("footerToggle")} on:click={toggleFooter}>
-                <ChevronDown size={14} />
-              </button>
-            </div>
+                <button type="button" class="icon small footer-toggle" class:open={!footerCollapsed} title={t("footerToggle")} aria-label={t("footerToggle")} on:click={toggleFooter}>
+                  <ChevronDown size={14} />
+                </button>
+              </div>
+            {/if}
             {#if gpuReadyRestart}
               <aside class="accel-banner fast">
                 <Zap size={15} />
@@ -2668,15 +2716,6 @@
               </aside>
             {/if}
             {#if !footerCollapsed}
-              <section class="model-note">
-                {#if selectableModels.length && selectedModel}
-                  <strong>{selectedModel.name}</strong>
-                  <span>{modelReadinessSummary()}</span>
-                {:else}
-                  <strong>{t("onboardingTitle")}</strong>
-                  <span>{t("noModelsInstalled")}</span>
-                {/if}
-              </section>
               {#if accelMode === "gpu"}
                 <aside class="accel-banner fast">
                   <Zap size={15} />
@@ -2713,6 +2752,7 @@
               {/if}
             {/if}
           </section>
+          {/if}
         </section>
       {:else if tab === "settings"}
         <section class="settings-grid">
@@ -2928,7 +2968,7 @@
           <div class="settings-side">
           <div class="group ai-settings">
             <div class="group-head"><h2>{t("aiTitle")}</h2></div>
-            <label class="toggle-row"><input type="checkbox" bind:checked={config.assistantEnabled} on:change={() => { aiRequestSequence++; aiLoading = false; aiAnswer = ""; aiReasoning = null; aiAnswerTruncated = false; aiError = ""; }} /><span>{t("aiEnabled")}</span></label>
+            <label class="toggle-row"><input type="checkbox" bind:checked={config.assistantEnabled} /><span>{t("aiEnabled")}</span></label>
             {#if config.assistantEnabled}
               <label><span>{t("aiProvider")}</span><input bind:value={config.assistantName} maxlength="100" /></label>
               <label><span>{t("aiBaseUrl")}</span><input type="url" bind:value={config.assistantBaseUrl} spellcheck="false" on:input={() => { aiModels = []; aiManualModelEntry = true; aiTestStatus = ""; }} /></label>
@@ -3810,6 +3850,16 @@
     gap: 8px;
   }
 
+  .toolbar-error {
+    flex: 1 1 100%;
+    margin: 0;
+    padding: 2px 0 0;
+    font-size: 11px;
+    line-height: 1.35;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
   .footer-bar {
     display: flex;
     align-items: center;
@@ -4000,26 +4050,6 @@
 
   .pane-actions.end {
     justify-content: flex-end;
-  }
-
-  .model-note {
-    margin: 0;
-    padding: 10px 12px;
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    color: var(--muted-text);
-    font-size: 12px;
-    white-space: nowrap;
-    overflow: hidden;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--surface);
-  }
-
-  .model-note span {
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 
   .settings-side { min-width: 0; display: grid; align-content: start; gap: 12px; }
@@ -4428,10 +4458,29 @@
   .ai-panel .ai-model-row select { width: 100%; min-width: 0; text-overflow: ellipsis; }
   .ai-panel .ai-model-row button { flex-shrink: 0; max-width: 42%; }
   .ai-panel .ai-selected-model { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ai-panel .ai-composer {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
   .ai-panel .ai-question-label {
     display: block;
-    margin-top: 10px;
+    margin: 0;
   }
+  .ai-panel .ai-composer-bottom {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 7px;
+  }
+  .ai-panel .ai-composer-bottom .muted {
+    flex: 1 1 180px;
+    min-width: 0;
+    margin: 0;
+  }
+  .ai-panel .ai-composer-bottom button { flex: 0 0 auto; }
   .ai-panel textarea {
     box-sizing: border-box;
     width: 100%;
@@ -4443,17 +4492,6 @@
     font-size: 11px;
     margin: 7px 0;
   }
-  .ai-panel .ai-context {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    cursor: pointer;
-  }
-  .ai-panel .ai-context input {
-    width: auto;
-    min-width: auto;
-  }
   .ai-panel .ai-answer {
     margin-top: 12px;
     border-top: 1px solid var(--border);
@@ -4463,6 +4501,18 @@
     font-size: 13px;
   }
   .ai-panel .ai-answer p { margin: 6px 0 0; }
+  .ai-panel .ai-user-question {
+    font-weight: 600;
+    font-size: 12px;
+    padding: 6px 8px;
+    border-left: 2px solid var(--border);
+    white-space: pre-wrap;
+  }
+  .ai-panel .ai-question-label > span {
+    display: block;
+    font-size: 11px;
+    margin-bottom: 5px;
+  }
   .ai-settings { min-width: 0; }
   .ai-settings input,
   .ai-settings textarea { min-width: 0; max-width: 100%; box-sizing: border-box; }
