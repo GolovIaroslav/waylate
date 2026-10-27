@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.9 (2026-10-27)
+
+- Use the original source text for every AI explanation: no separate context checkbox.
+- Place the optional AI question composer below the conversation, with send controls at the bottom.
+- Remove redundant translator status/model cards from the bottom of the translation view; keep translation errors visible near the translate controls.
+- Make the default system prompt concise and plain-text, automatically updating only the unchanged v0.1.8 default while preserving custom prompts.
+- Explain the selected text when Ask AI is pressed with an empty question; follow-up questions are optional.
+- Retain independent, bounded AI conversation threads per source text and language pair, including prior questions and answers.
+- Keep AI conversation data in memory only, separate from translation history and saved vocabulary; all threads disappear when Waylate closes.
+- Preserve the selected AI model, reasoning option, system prompt and ordinary translation workflow.
+
 ## 0.1.8 (2026-10-27)
 
 - Add an opt-in AI question assistant separate from ordinary translation, dictionary lookups, and local vocabulary.
