@@ -1,7 +1,7 @@
 {
   "name": "waylate",
-  "version": "0.1.7",
-  "description": "",
+  "version": "0.1.8",
+  "description": "Wayland popup translator and language-learning companion for Arch Linux and KDE",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
