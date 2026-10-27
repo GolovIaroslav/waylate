@@ -1,4 +1,5 @@
 mod autostart;
+mod assistant;
 mod clipboard;
 mod config;
 mod dictionary;
@@ -69,6 +70,7 @@ struct AppSnapshot {
     has_google_key: bool,
     has_yandex_key: bool,
     has_local_key: bool,
+    has_ai_key: bool,
     paths: PathReport,
 }
 
@@ -167,6 +169,7 @@ fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
         has_google_key: secrets::has("google"),
         has_yandex_key: secrets::has("yandex"),
         has_local_key: secrets::has("openai-compatible"),
+        has_ai_key: secrets::has("ai-assistant"),
         paths: PathReport {
             config_dir: state.paths.config_dir.display().to_string(),
             data_dir: state.paths.data_dir.display().to_string(),
@@ -283,6 +286,20 @@ async fn translate_text(
         )?;
     }
     Ok(response)
+}
+
+#[tauri::command]
+async fn assistant_models(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let config = config::load(&state.paths)?;
+    tauri::async_runtime::spawn_blocking(move || assistant::models(&config))
+        .await.map_err(|_| "AI worker failed".to_string())?
+}
+
+#[tauri::command]
+async fn assistant_ask(state: State<'_, AppState>, request: assistant::AskRequest) -> Result<assistant::AiAnswer, String> {
+    let config = config::load(&state.paths)?;
+    tauri::async_runtime::spawn_blocking(move || assistant::ask(&config, request))
+        .await.map_err(|_| "AI worker failed".to_string())?
 }
 
 #[tauri::command]
@@ -1981,6 +1998,8 @@ pub fn run() {
             get_model_status,
             save_config,
             translate_text,
+            assistant_models,
+            assistant_ask,
             read_selection_text,
             read_clipboard_text,
             write_clipboard_text,
