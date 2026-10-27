@@ -2,6 +2,9 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 
+pub const DEFAULT_ASSISTANT_PROMPT: &str = "You are a concise language-learning assistant. Explain the source text and answer questions in {target_language}, unless asked otherwise. Use plain text only: no Markdown, headings, bullet lists, tables or code fences. Usually answer in 2-4 short sentences; provide examples only when useful. For follow-ups, answer directly without repeating earlier explanations. Expand only when asked for detail.";
+const LEGACY_ASSISTANT_PROMPT: &str = "You help people learn foreign languages. Explain vocabulary, usage, nuances and examples clearly. Answer in {target_language} unless the user explicitly requests otherwise.";
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 #[serde(rename_all = "camelCase")]
@@ -72,7 +75,7 @@ impl Default for AppConfig {
             assistant_model: String::new(),
             assistant_timeout_secs: 120,
             assistant_reasoning_effort: "default".into(),
-            assistant_system_prompt: "You help people learn foreign languages. Explain vocabulary, usage, nuances and examples clearly. Answer in {target_language} unless the user explicitly requests otherwise.".into(),
+            assistant_system_prompt: DEFAULT_ASSISTANT_PROMPT.into(),
             custom_backend_mode: "external-openai".into(),
             custom_model_path: String::new(),
             local_llama_server_path: String::new(),
@@ -157,7 +160,9 @@ pub fn load(paths: &AppPaths) -> Result<AppConfig, String> {
             return Ok(config);
         }
     };
-    if migrate_legacy_model_selection(paths, &mut config) {
+    let updated_model = migrate_legacy_model_selection(paths, &mut config);
+    let updated_prompt = migrate_original_assistant_prompt(&mut config);
+    if updated_model || updated_prompt {
         save(paths, &config)?;
     }
     Ok(config)
@@ -169,10 +174,18 @@ pub fn save(paths: &AppPaths, config: &AppConfig) -> Result<(), String> {
     // Write to a temp file in the same dir then rename: rename() is atomic on the same
     // filesystem, so a kill mid-write can never leave a truncated/empty config.json.
     let tmp = paths.config_file.with_extension("json.tmp");
-    fs::write(&tmp, raw)
-        .map_err(|err| format!("Could not write {}: {err}", tmp.display()))?;
+    fs::write(&tmp, raw).map_err(|err| format!("Could not write {}: {err}", tmp.display()))?;
     fs::rename(&tmp, &paths.config_file)
         .map_err(|err| format!("Could not write {}: {err}", paths.config_file.display()))
+}
+
+fn migrate_original_assistant_prompt(config: &mut AppConfig) -> bool {
+    if config.assistant_system_prompt == LEGACY_ASSISTANT_PROMPT {
+        config.assistant_system_prompt = DEFAULT_ASSISTANT_PROMPT.into();
+        true
+    } else {
+        false
+    }
 }
 
 fn migrate_legacy_model_selection(_paths: &AppPaths, config: &mut AppConfig) -> bool {
@@ -196,10 +209,22 @@ fn migrate_legacy_model_selection(_paths: &AppPaths, config: &mut AppConfig) -> 
     config.model_id != previous
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_default_prompt_migrates_but_custom_prompt_is_preserved() {
+        let mut config = AppConfig::default();
+        assert!(config.assistant_system_prompt.contains("no Markdown"));
+        config.assistant_system_prompt = LEGACY_ASSISTANT_PROMPT.into();
+        assert!(migrate_original_assistant_prompt(&mut config));
+        assert_eq!(config.assistant_system_prompt, DEFAULT_ASSISTANT_PROMPT);
+        let custom = "Answer in {target_language}, include examples";
+        config.assistant_system_prompt = custom.into();
+        assert!(!migrate_original_assistant_prompt(&mut config));
+        assert_eq!(config.assistant_system_prompt, custom);
+    }
 
     #[test]
     fn config_defaults_keep_history_and_api_off() {
@@ -237,7 +262,8 @@ mod tests {
     fn temp_paths() -> AppPaths {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("waylate-config-{}-{}", std::process::id(), n));
+        let root =
+            std::env::temp_dir().join(format!("waylate-config-{}-{}", std::process::id(), n));
         AppPaths {
             config_file: root.join("config/config.json"),
             history_db: root.join("data/history.sqlite3"),
@@ -269,7 +295,10 @@ mod tests {
         assert!(!loaded.assistant_enabled);
         assert_eq!(loaded.assistant_name, "Study helper");
         assert_eq!(loaded.assistant_reasoning_effort, "low");
-        assert_eq!(loaded.assistant_system_prompt, "Answer in {target_language}");
+        assert_eq!(
+            loaded.assistant_system_prompt,
+            "Answer in {target_language}"
+        );
         assert_eq!(loaded.local_context_size, 8192);
         assert!(loaded.vulkan_gpu_enabled);
         let _ = std::fs::remove_dir_all(&paths.config_dir.parent().unwrap());
