@@ -309,7 +309,7 @@ fn read_selection_text() -> Result<String, String> {
 
 #[tauri::command]
 fn read_clipboard_text() -> Result<String, String> {
-    clipboard::read_clipboard()
+    clipboard::read_clipboard().map(|text| clipboard::normalize_selected_text(&text))
 }
 
 #[tauri::command]
@@ -1295,10 +1295,10 @@ fn human_bytes(bytes: u64) -> String {
 
 fn read_selection_with_fallback() -> Result<(String, Option<String>), String> {
     match clipboard::read_primary_selection() {
-        Ok(text) if !text.trim().is_empty() => Ok((text, None)),
+        Ok(text) if !text.trim().is_empty() => Ok((clipboard::normalize_primary_selection_text(&text), None)),
         _ => match clipboard::read_clipboard() {
             Ok(text) if !text.trim().is_empty() => Ok((
-                text,
+                clipboard::normalize_selected_text(&text),
                 Some("Primary selection was empty, so Waylate used the clipboard.".into()),
             )),
             _ => Ok((
@@ -1381,7 +1381,9 @@ fn handle_args(app: &AppHandle, args: &[String]) {
             );
         }
         Some("translate-clipboard") => {
-            let source_text = clipboard::read_clipboard().unwrap_or_default();
+            let source_text = clipboard::read_clipboard()
+                .map(|t| clipboard::normalize_selected_text(&t))
+                .unwrap_or_default();
             let _ = set_pending(
                 app,
                 PendingRequest {
@@ -1426,7 +1428,9 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "translate_clipboard" => {
-                let source_text = clipboard::read_clipboard().unwrap_or_default();
+                let source_text = clipboard::read_clipboard()
+                    .map(|t| clipboard::normalize_selected_text(&t))
+                    .unwrap_or_default();
                 let _ = set_pending(
                     app,
                     PendingRequest {

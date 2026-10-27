@@ -1,6 +1,6 @@
 [package]
 name = "waylate"
-version = "0.1.9"
+version = "0.1.10"
 description = "Wayland translator and language-learning companion with optional AI"
 authors = ["jar"]
 edition = "2021"
