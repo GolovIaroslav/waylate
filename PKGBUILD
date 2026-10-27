@@ -1,6 +1,6 @@
 # Maintainer: jar
 pkgname=waylate
-pkgver=0.1.9
+pkgver=0.1.10
 pkgrel=1
 pkgdesc="Compact Wayland translator and language-learning companion with optional AI"
 arch=("x86_64")

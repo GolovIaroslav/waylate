@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.10 (2026-10-27)
+
+- Restore the previously local-only PDF selection normalization in the shipped app: remove artificial word-per-line and blank-line breaks from Wayland PRIMARY selection.
+- Apply equivalent cleanup to clipboard fallback, explicit clipboard translation, and the tray command, including hyphenated words.
+- Detect word-fragmented PDF clipboard content without merging regular paragraphs and short lists.
+- Add regression coverage for PDF extraction, Cyrillic words, soft line wraps, hyphenation and paragraph preservation.
+- Keep existing providers, API URLs, keys, AI settings, vocabulary, autostart and history unchanged.
+
 ## 0.1.9 (2026-10-27)
 
 - Use the original source text for every AI explanation: no separate context checkbox.

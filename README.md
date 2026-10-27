@@ -61,6 +61,14 @@ When the selected text is not readable from the Wayland primary selection,
 Waylate falls back to the clipboard and still lets you paste text manually in
 the popup.
 
+PDF viewers can put a line break (sometimes a blank line) between every
+selected word. Waylate now joins these fragments when opening a selection or
+the clipboard and rejoins words hyphenated across wrapped PDF lines. Ordinary
+clipboard paragraphs remain separated unless the text strongly resembles
+one-word-per-line PDF extraction. This normalization affects the text sent
+for translation, not the original PDF or system clipboard.
+
+
 Other useful commands:
 
 ```bash
