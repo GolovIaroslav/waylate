@@ -3,6 +3,8 @@
 ## 0.1.8 (2026-10-27)
 
 - Add an opt-in AI question assistant separate from ordinary translation, dictionary lookups, and local vocabulary.
+- Choose discovered models from `/models` or enter an ID manually; configure optional reasoning levels without forcing unsupported parameters.
+- Separate returned reasoning from the final answer in a collapsible panel and identify truncated responses.
 - Separate optional model listing from an explicit model-generation test request, so connection status reflects the requested operation.
 - Configure one user-owned OpenAI-compatible connection: Base URL, optional system-keychain API key, model ID, optional /models discovery, and request timeout.
 - Add an editable persistent system prompt with the target-language placeholder, a compact Ask AI panel, optional source-text context, and EN/RU/SK localization.
