@@ -31,6 +31,7 @@ pub struct AppConfig {
     pub assistant_base_url: String,
     pub assistant_model: String,
     pub assistant_timeout_secs: u64,
+    pub assistant_reasoning_effort: String,
     pub assistant_system_prompt: String,
     pub custom_backend_mode: String,
     pub custom_model_path: String,
@@ -70,6 +71,7 @@ impl Default for AppConfig {
             assistant_base_url: "http://127.0.0.1:8080/v1".into(),
             assistant_model: String::new(),
             assistant_timeout_secs: 120,
+            assistant_reasoning_effort: "default".into(),
             assistant_system_prompt: "You help people learn foreign languages. Explain vocabulary, usage, nuances and examples clearly. Answer in {target_language} unless the user explicitly requests otherwise.".into(),
             custom_backend_mode: "external-openai".into(),
             custom_model_path: String::new(),
@@ -207,6 +209,7 @@ mod tests {
         assert!(!config.history_enabled);
         assert!(!config.dictionary_enabled);
         assert!(!config.assistant_enabled);
+        assert_eq!(config.assistant_reasoning_effort, "default");
         assert!(!config.api_provider_enabled);
         assert_eq!(config.local_model_policy, "balanced");
         assert_eq!(config.local_model_idle_timeout_secs, 600);
@@ -253,6 +256,7 @@ mod tests {
         config.history_enabled = true;
         config.dictionary_enabled = true;
         config.assistant_name = "Study helper".into();
+        config.assistant_reasoning_effort = "low".into();
         config.assistant_system_prompt = "Answer in {target_language}".into();
         config.local_context_size = 8192;
         config.vulkan_gpu_enabled = true;
@@ -264,6 +268,7 @@ mod tests {
         assert!(loaded.dictionary_enabled);
         assert!(!loaded.assistant_enabled);
         assert_eq!(loaded.assistant_name, "Study helper");
+        assert_eq!(loaded.assistant_reasoning_effort, "low");
         assert_eq!(loaded.assistant_system_prompt, "Answer in {target_language}");
         assert_eq!(loaded.local_context_size, 8192);
         assert!(loaded.vulkan_gpu_enabled);

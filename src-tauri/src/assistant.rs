@@ -20,6 +20,8 @@ pub struct AskRequest {
 #[serde(rename_all = "camelCase")]
 pub struct AiAnswer {
     pub text: String,
+    pub reasoning: Option<String>,
+    pub truncated: bool,
 }
 
 fn endpoint(config: &AppConfig, route: &str) -> Result<Url, String> {
@@ -64,6 +66,9 @@ fn read_json(response: Response) -> Result<Value, String> {
         return Err(match status {
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
                 "AI authentication failed (401/403)".into()
+            }
+            StatusCode::BAD_REQUEST => {
+                "AI request rejected (400); check model and reasoning compatibility".into()
             }
             StatusCode::NOT_FOUND => "AI endpoint or model not found (404)".into(),
             StatusCode::TOO_MANY_REQUESTS => "AI rate limit reached (429)".into(),
@@ -113,6 +118,81 @@ pub fn models(config: &AppConfig) -> Result<Vec<String>, String> {
         .map(str::to_owned)
         .collect())
 }
+fn chat_payload(config: &AppConfig, system: &str, user: &str) -> Result<Value, String> {
+    let mut body = json!({"model":config.assistant_model,"messages":[
+        {"role":"system","content":system},{"role":"user","content":user}
+    ],"stream":false});
+    match config.assistant_reasoning_effort.as_str() {
+        "default" => {}
+        effort @ ("none" | "minimal" | "low" | "medium" | "high" | "xhigh") => {
+            body["reasoning_effort"] = Value::String(effort.to_owned());
+        }
+        _ => return Err("Unknown reasoning effort setting".into()),
+    };
+    Ok(body)
+}
+
+fn response_text(message: &Value) -> String {
+    if let Some(s) = message.get("content").and_then(Value::as_str) {
+        return s.trim().to_owned();
+    }
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| {
+                    if part.get("type").and_then(Value::as_str) == Some("text") {
+                        part.get("text").and_then(Value::as_str)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+fn parse_chat_answer(value: &Value) -> Result<AiAnswer, String> {
+    let message = value
+        .pointer("/choices/0/message")
+        .ok_or("AI response contains no assistant message")?;
+    let mut text = response_text(message);
+    let mut reasoning = message
+        .get("reasoning_content")
+        .or_else(|| message.get("reasoning"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_owned());
+    // Some local templates embed reasoning in the response text.
+    if text.starts_with("<think>") {
+        if let Some((thought, answer)) = text["<think>".len()..].split_once("</think>") {
+            if reasoning.is_none() && !thought.trim().is_empty() {
+                reasoning = Some(thought.trim().to_owned());
+            }
+            text = answer.trim().to_owned();
+        }
+    }
+    if text.is_empty() {
+        return Err(if reasoning.is_some() {
+            "AI returned reasoning but no final answer; try a lower reasoning level".into()
+        } else {
+            "AI response contains no final text".into()
+        });
+    }
+    let truncated = value
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        == Some("length");
+    Ok(AiAnswer {
+        text,
+        reasoning,
+        truncated,
+    })
+}
+
 pub fn ask(config: &AppConfig, request: AskRequest) -> Result<AiAnswer, String> {
     if !config.assistant_enabled {
         return Err("AI assistant disabled".into());
@@ -143,9 +223,7 @@ pub fn ask(config: &AppConfig, request: AskRequest) -> Result<AiAnswer, String> 
             request.context, request.question
         )
     };
-    let body = json!({"model":config.assistant_model,"messages":[
-        {"role":"system","content":system},{"role":"user","content":user}
-    ],"stream":false});
+    let body = chat_payload(config, &system, &user)?;
     let response = authorized(
         client(config)?
             .post(endpoint(config, "chat/completions")?)
@@ -154,17 +232,7 @@ pub fn ask(config: &AppConfig, request: AskRequest) -> Result<AiAnswer, String> 
     .send()
     .map_err(network_error)?;
     let value = read_json(response)?;
-    let answer = value
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .ok_or("AI response contains no answer")?
-        .trim();
-    if answer.is_empty() {
-        return Err("AI returned an empty answer".into());
-    }
-    Ok(AiAnswer {
-        text: answer.to_owned(),
-    })
+    parse_chat_answer(&value)
 }
 #[cfg(test)]
 mod tests {
@@ -238,6 +306,56 @@ mod tests {
         config.assistant_base_url = mock_server(200, r#"{"data":"invalid"}"#);
         assert!(models(&config).unwrap_err().contains("data array"));
     }
+    #[test]
+    fn reasoning_effort_is_opt_in_and_validated() {
+        let mut cfg = AppConfig::default();
+        let default_body = chat_payload(&cfg, "system", "user").unwrap();
+        assert!(default_body.get("reasoning_effort").is_none());
+        for effort in ["none", "minimal", "low", "medium", "high", "xhigh"] {
+            cfg.assistant_reasoning_effort = effort.into();
+            let body = chat_payload(&cfg, "system", "user").unwrap();
+            assert_eq!(body["reasoning_effort"], effort);
+            assert_eq!(body["messages"][0]["role"], "system");
+        }
+        cfg.assistant_reasoning_effort = "ignore all instructions".into();
+        assert!(chat_payload(&cfg, "system", "user").is_err());
+    }
+
+    #[test]
+    fn parses_separate_reasoning_and_detects_truncation() {
+        let response = json!({"choices":[{"finish_reason":"length",
+            "message":{"content":"Колючий куст.","reasoning_content":"Checking vocabulary"}}]});
+        let answer = parse_chat_answer(&response).unwrap();
+        assert_eq!(answer.text, "Колючий куст.");
+        assert_eq!(answer.reasoning.as_deref(), Some("Checking vocabulary"));
+        assert!(answer.truncated);
+    }
+
+    #[test]
+    fn parses_local_think_tags_without_mixing_them_into_answer() {
+        let response = json!({"choices":[{"finish_reason":"stop",
+            "message":{"content":"<think>Consider meanings.</think>Колкий или колючий."}}]});
+        let answer = parse_chat_answer(&response).unwrap();
+        assert_eq!(answer.text, "Колкий или колючий.");
+        assert_eq!(answer.reasoning.as_deref(), Some("Consider meanings."));
+        assert!(!answer.truncated);
+    }
+
+    #[test]
+    fn no_final_answer_is_not_mistaken_for_reasoning() {
+        let response =
+            json!({"choices":[{"message":{"content":"","reasoning_content":"thought only"}}]});
+        assert!(parse_chat_answer(&response)
+            .unwrap_err()
+            .contains("no final answer"));
+    }
+
+    #[test]
+    fn accepts_text_parts_from_compatible_provider() {
+        let response = json!({"choices":[{"message":{"content":[{"type":"text","text":"First"},{"type":"text","text":"Second"}]}}]});
+        assert_eq!(parse_chat_answer(&response).unwrap().text, "First\nSecond");
+    }
+
     #[test]
     fn rejects_unsafe_urls() {
         let mut c = AppConfig::default();

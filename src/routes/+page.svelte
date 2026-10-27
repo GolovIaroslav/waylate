@@ -120,6 +120,7 @@
     assistantBaseUrl: string;
     assistantModel: string;
     assistantTimeoutSecs: number;
+    assistantReasoningEffort: string;
     assistantSystemPrompt: string;
     customBackendMode: string;
     customModelPath: string;
@@ -298,6 +299,9 @@
   let aiQuestion = "";
   let aiUseContext = true;
   let aiAnswer = "";
+  let aiReasoning: string | null = null;
+  let aiAnswerTruncated = false;
+  let aiManualModelEntry = true;
   let aiError = "";
   let aiLoading = false;
   let aiModels: string[] = [];
@@ -586,6 +590,19 @@
       aiProvider: "Connection name",
       aiBaseUrl: "Base URL",
       aiModel: "Model ID",
+      aiChooseModel: "Available models",
+      aiManualModel: "Enter model ID manually",
+      aiReasoningEffort: "Reasoning effort",
+      aiReasoningDefault: "Provider default",
+      aiReasoningNone: "Off (if supported)",
+      aiReasoningMinimal: "Minimal",
+      aiReasoningLow: "Low",
+      aiReasoningMedium: "Medium",
+      aiReasoningHigh: "High",
+      aiReasoningXhigh: "Extra high",
+      aiReasoningHint: "Not all models support these levels. Unsupported values can return an API error.",
+      aiReasoningDetails: "Model reasoning (if returned)",
+      aiAnswerTruncated: "The model stopped at its output limit; the answer may be incomplete.",
       aiTimeout: "Timeout (seconds)",
       aiKey: "Optional API key",
       aiSaveKey: "Save key",
@@ -785,6 +802,19 @@
       aiProvider: "Имя подключения",
       aiBaseUrl: "Адрес API (Base URL)",
       aiModel: "ID модели",
+      aiChooseModel: "Доступные модели",
+      aiManualModel: "Ввести ID модели вручную",
+      aiReasoningEffort: "Уровень рассуждений",
+      aiReasoningDefault: "По умолчанию у провайдера",
+      aiReasoningNone: "Выключить (если поддерживается)",
+      aiReasoningMinimal: "Минимальный",
+      aiReasoningLow: "Низкий",
+      aiReasoningMedium: "Средний",
+      aiReasoningHigh: "Высокий",
+      aiReasoningXhigh: "Очень высокий",
+      aiReasoningHint: "Не все модели поддерживают уровни. Несовместимая настройка может вызвать ошибку API.",
+      aiReasoningDetails: "Рассуждения модели (если доступны)",
+      aiAnswerTruncated: "Модель достигла лимита вывода; ответ может быть неполным.",
       aiTimeout: "Таймаут (секунды)",
       aiKey: "API-ключ (необязательно)",
       aiSaveKey: "Сохранить ключ",
@@ -984,6 +1014,19 @@
       aiProvider: "Názov pripojenia",
       aiBaseUrl: "Adresa API (Base URL)",
       aiModel: "ID modelu",
+      aiChooseModel: "Dostupné modely",
+      aiManualModel: "Zadať ID modelu ručne",
+      aiReasoningEffort: "Úroveň uvažovania",
+      aiReasoningDefault: "Predvolené nastavenie poskytovateľa",
+      aiReasoningNone: "Vypnúť (ak je podporované)",
+      aiReasoningMinimal: "Minimálna",
+      aiReasoningLow: "Nízka",
+      aiReasoningMedium: "Stredná",
+      aiReasoningHigh: "Vysoká",
+      aiReasoningXhigh: "Veľmi vysoká",
+      aiReasoningHint: "Nie všetky modely tieto úrovne podporujú. Nepodporovaná hodnota môže spôsobiť chybu API.",
+      aiReasoningDetails: "Uvažovanie modelu (ak sa vracia)",
+      aiAnswerTruncated: "Model dosiahol limit výstupu; odpoveď môže byť neúplná.",
       aiTimeout: "Časový limit (sekundy)",
       aiKey: "API kľúč (nepovinné)",
       aiSaveKey: "Uložiť kľúč",
@@ -1566,12 +1609,34 @@
     try {
       await persistConfig(false);
       aiModels = await invoke<string[]>("assistant_models");
+      if (config && !config.assistantModel.trim() && aiModels.length) {
+        config.assistantModel = aiModels[0];
+      }
+      aiManualModelEntry = !aiModels.includes(config?.assistantModel ?? "");
       aiTestStatus = aiModels.length ? t("aiModelsFound").replace("{count}", String(aiModels.length)) : t("aiNoModels");
     } catch (err) {
+      aiModels = [];
+      aiManualModelEntry = true;
       aiTestStatus = String(err);
     } finally {
       aiModelLoading = false;
     }
+  }
+
+  function selectAiModel(event: Event) {
+    if (!config) return;
+    const id = (event.currentTarget as HTMLSelectElement).value;
+    if (id === "__manual__") {
+      aiManualModelEntry = true;
+      return;
+    }
+    aiManualModelEntry = false;
+    config.assistantModel = id;
+    aiRequestSequence++;
+    aiLoading = false;
+    aiAnswer = "";
+    aiReasoning = null;
+    aiAnswerTruncated = false;
   }
 
   async function testAiConnection() {
@@ -1600,14 +1665,20 @@
     aiLoading = true;
     aiError = "";
     aiAnswer = "";
+    aiReasoning = null;
+    aiAnswerTruncated = false;
     const currentRequest = ++aiRequestSequence;
     const targetLanguage = languageLabel(config.targetLang);
     try {
       await persistConfig(false);
-      const response = await invoke<{ text: string }>("assistant_ask", {
+      const response = await invoke<{ text: string; reasoning?: string | null; truncated: boolean }>("assistant_ask", {
         request: { question: aiQuestion, context: aiUseContext ? sourceText : "", targetLanguage },
       });
-      if (currentRequest === aiRequestSequence && config?.assistantEnabled) aiAnswer = response.text;
+      if (currentRequest === aiRequestSequence && config?.assistantEnabled) {
+        aiAnswer = response.text;
+        aiReasoning = response.reasoning ?? null;
+        aiAnswerTruncated = response.truncated;
+      }
     } catch (err) {
       if (currentRequest === aiRequestSequence && config?.assistantEnabled) aiError = String(err);
     } finally {
@@ -2476,7 +2547,20 @@
 
           {#if config.assistantEnabled}
             <details class="dictionary-panel ai-panel">
-              <summary><strong>{t("aiTitle")}</strong> <span class="muted">{config.assistantName || config.assistantModel}</span></summary>
+              <summary><strong>{t("aiTitle")}</strong> <span class="muted" title={config.assistantModel}>{config.assistantName ? `${config.assistantName} · ${config.assistantModel}` : config.assistantModel}</span></summary>
+              <div class="ai-model-row">
+                <label><span>{t("aiModel")}</span>
+                  {#if aiModels.length}
+                    <select value={config.assistantModel} on:change={selectAiModel}>
+                      {#if !aiModels.includes(config.assistantModel)}<option value={config.assistantModel}>{config.assistantModel}</option>{/if}
+                      {#each aiModels as modelId}<option value={modelId}>{modelId}</option>{/each}
+                    </select>
+                  {:else}
+                    <span class="ai-selected-model" title={config.assistantModel}>{config.assistantModel || "—"}</span>
+                  {/if}
+                </label>
+                <button type="button" disabled={aiModelLoading} on:click={fetchAiModels}>{t("aiFindModels")}</button>
+              </div>
               <label class="ai-question-label">
                 <span class="visually-hidden">{t("aiQuestion")}</span>
                 <textarea rows="2" bind:value={aiQuestion} placeholder={t("aiQuestionHint")}></textarea>
@@ -2485,7 +2569,19 @@
               <p class="muted">{t("aiContextHint")}</p>
               <button type="button" class="primary" disabled={aiLoading || !aiQuestion.trim() || !config.assistantModel.trim()} on:click={askAi}>{aiLoading ? t("aiSending") : t("aiSend")}</button>
               {#if aiError}<p role="alert" class="inline-note error-note">{aiError}</p>{/if}
-              {#if aiAnswer}<div class="ai-answer" aria-live="polite"><strong>{t("aiAnswer")}</strong><p>{aiAnswer}</p></div>{/if}
+              {#if aiAnswer}
+                <div class="ai-answer" aria-live="polite">
+                  <strong>{t("aiAnswer")}</strong>
+                  <p>{aiAnswer}</p>
+                  {#if aiAnswerTruncated}<p class="inline-note" role="status">{t("aiAnswerTruncated")}</p>{/if}
+                  {#if aiReasoning}
+                    <details class="ai-reasoning">
+                      <summary>{t("aiReasoningDetails")}</summary>
+                      <p>{aiReasoning}</p>
+                    </details>
+                  {/if}
+                </div>
+              {/if}
             </details>
           {/if}
 
@@ -2832,12 +2928,35 @@
           <div class="settings-side">
           <div class="group ai-settings">
             <div class="group-head"><h2>{t("aiTitle")}</h2></div>
-            <label class="toggle-row"><input type="checkbox" bind:checked={config.assistantEnabled} on:change={() => { aiRequestSequence++; aiLoading = false; aiAnswer = ""; aiError = ""; }} /><span>{t("aiEnabled")}</span></label>
+            <label class="toggle-row"><input type="checkbox" bind:checked={config.assistantEnabled} on:change={() => { aiRequestSequence++; aiLoading = false; aiAnswer = ""; aiReasoning = null; aiAnswerTruncated = false; aiError = ""; }} /><span>{t("aiEnabled")}</span></label>
             {#if config.assistantEnabled}
               <label><span>{t("aiProvider")}</span><input bind:value={config.assistantName} maxlength="100" /></label>
-              <label><span>{t("aiBaseUrl")}</span><input type="url" bind:value={config.assistantBaseUrl} spellcheck="false" /></label>
-              <label><span>{t("aiModel")}</span><input bind:value={config.assistantModel} list="waylate-ai-models" spellcheck="false" /></label>
-              <datalist id="waylate-ai-models">{#each aiModels as id}<option value={id}></option>{/each}</datalist>
+              <label><span>{t("aiBaseUrl")}</span><input type="url" bind:value={config.assistantBaseUrl} spellcheck="false" on:input={() => { aiModels = []; aiManualModelEntry = true; aiTestStatus = ""; }} /></label>
+              {#if aiModels.length}
+                <label><span>{t("aiChooseModel")}</span>
+                  <select class="ai-model-picker" value={aiManualModelEntry ? "__manual__" : config.assistantModel} on:change={selectAiModel}>
+                    {#each aiModels as modelId}
+                      <option value={modelId}>{modelId}</option>
+                    {/each}
+                    <option value="__manual__">{t("aiManualModel")}</option>
+                  </select>
+                </label>
+              {/if}
+              {#if aiManualModelEntry || !aiModels.length}
+                <label><span>{t("aiModel")}</span><input bind:value={config.assistantModel} maxlength="256" spellcheck="false" /></label>
+              {/if}
+              <label><span>{t("aiReasoningEffort")}</span>
+                <select bind:value={config.assistantReasoningEffort}>
+                  <option value="default">{t("aiReasoningDefault")}</option>
+                  <option value="none">{t("aiReasoningNone")}</option>
+                  <option value="minimal">{t("aiReasoningMinimal")}</option>
+                  <option value="low">{t("aiReasoningLow")}</option>
+                  <option value="medium">{t("aiReasoningMedium")}</option>
+                  <option value="high">{t("aiReasoningHigh")}</option>
+                  <option value="xhigh">{t("aiReasoningXhigh")}</option>
+                </select>
+              </label>
+              <p class="muted">{t("aiReasoningHint")}</p>
               <label><span>{t("aiTimeout")}</span><input type="number" min="1" max="300" bind:value={config.assistantTimeoutSecs} /></label>
               <div class="settings-actions">
                 <button type="button" on:click={fetchAiModels} disabled={aiModelLoading}>{t("aiFindModels")}</button>
@@ -3274,8 +3393,11 @@
   .translate-view {
     min-height: 0;
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr) auto auto auto;
-    overflow: hidden;
+    grid-template-rows: auto minmax(170px, 1fr) auto auto auto;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    overscroll-behavior: contain;
   }
 
   .toolbar {
@@ -4288,8 +4410,24 @@
     gap: 8px;
     cursor: pointer;
     align-items: center;
-    overflow-wrap: anywhere;
   }
+  .ai-panel > summary .muted {
+    min-width: 0;
+    max-width: 72%;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .ai-panel .ai-model-row {
+    display: flex;
+    align-items: end;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .ai-panel .ai-model-row label { display: grid; flex: 1; min-width: 0; gap: 3px; font-size: 11px; }
+  .ai-panel .ai-model-row select { width: 100%; min-width: 0; text-overflow: ellipsis; }
+  .ai-panel .ai-model-row button { flex-shrink: 0; max-width: 42%; }
+  .ai-panel .ai-selected-model { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ai-panel .ai-question-label {
     display: block;
     margin-top: 10px;
@@ -4330,4 +4468,8 @@
   .ai-settings textarea { min-width: 0; max-width: 100%; box-sizing: border-box; }
   .ai-settings .toggle-row { display: flex; align-items: center; gap: 8px; }
   .ai-settings .toggle-row input { width: auto; }
+  .ai-settings .ai-model-picker { width: 100%; max-width: 100%; text-overflow: ellipsis; }
+  .ai-panel .ai-reasoning { margin-top: 9px; font-size: 12px; }
+  .ai-panel .ai-reasoning summary { cursor: pointer; }
+  .ai-panel .ai-reasoning p { white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>
