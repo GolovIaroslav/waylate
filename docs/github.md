@@ -3,13 +3,13 @@
 Suggested repository description:
 
 ```text
-Wayland popup translator for Arch Linux and KDE Plasma — DeepL/Google/Yandex API keys or local models.
+Wayland translator and language-learning companion for KDE/Arch: translation, dictionary, vocabulary, optional AI.
 ```
 
 Suggested topics:
 
 ```text
-wayland kde arch-linux tauri svelte translation deepl api translator llm nllb
+wayland kde arch-linux tauri svelte translation language-learning dictionary vocabulary ai-assistant llm
 ```
 
 The README starts with installation and shortcut setup, then API providers

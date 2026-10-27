@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.8 (2026-10-27)
+
+- Add an opt-in AI question assistant separate from ordinary translation, dictionary lookups, and local vocabulary.
+- Separate optional model listing from an explicit model-generation test request, so connection status reflects the requested operation.
+- Configure one user-owned OpenAI-compatible connection: Base URL, optional system-keychain API key, model ID, optional /models discovery, and request timeout.
+- Add an editable persistent system prompt with the target-language placeholder, a compact Ask AI panel, optional source-text context, and EN/RU/SK localization.
+- Apply HTTPS-only remote URL validation, bounded non-streaming requests, safe HTTP/network errors, and protection against stale responses.
+- Document AI usage, privacy, potential provider costs and API limitations, and an AnkiConnect follow-up design (not implemented).
+- Preserve existing local history, dictionary, vocabulary, autostart, application ID, and saved configuration; AI remains off for existing installs unless explicitly enabled.
+
 ## 0.1.7 (2026-10-27)
 
 - Add an opt-in, free online word dictionary showing multiple meanings, examples,
