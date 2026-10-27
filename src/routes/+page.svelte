@@ -115,6 +115,12 @@
     localModelIdleTimeoutSecs: number;
     openaiEndpoint: string;
     openaiModel: string;
+    assistantEnabled: boolean;
+    assistantName: string;
+    assistantBaseUrl: string;
+    assistantModel: string;
+    assistantTimeoutSecs: number;
+    assistantSystemPrompt: string;
     customBackendMode: string;
     customModelPath: string;
     localLlamaServerPath: string;
@@ -204,6 +210,7 @@
     hasGoogleKey: boolean;
     hasYandexKey: boolean;
     hasLocalKey: boolean;
+    hasAiKey: boolean;
     paths: {
       configDir: string;
       dataDir: string;
@@ -288,8 +295,19 @@
   let checkedWordKey = "";
   let dictionaryLookupRequest = 0;
   let dictionaryTranslatedKey = "";
+  let aiQuestion = "";
+  let aiUseContext = true;
+  let aiAnswer = "";
+  let aiError = "";
+  let aiLoading = false;
+  let aiModels: string[] = [];
+  let aiKey = "";
+  let aiTestStatus = "";
+  let aiModelLoading = false;
+  let aiRequestSequence = 0;
 
-  type SecretProvider = "deepl" | "google" | "yandex" | "openai-compatible";
+
+  type SecretProvider = "deepl" | "google" | "yandex" | "openai-compatible" | "ai-assistant";
 
   $: selectedModel = modelProfiles.find((model) => model.id === config?.modelId)
     ?? snapshot?.catalog.find((model) => model.id === config?.modelId);
@@ -563,6 +581,31 @@
   const uiTexts = {
     en: {
       translate: "Translate",
+      aiTitle: "Ask AI",
+      aiEnabled: "Enable AI assistant",
+      aiProvider: "Connection name",
+      aiBaseUrl: "Base URL",
+      aiModel: "Model ID",
+      aiTimeout: "Timeout (seconds)",
+      aiKey: "Optional API key",
+      aiSaveKey: "Save key",
+      aiClearKey: "Remove key",
+      aiFindModels: "Fetch models",
+      aiTestModel: "Test model",
+      aiConnectionOk: "Model responded successfully.",
+      aiModelsFound: "{count} models available",
+      aiNoModels: "No models returned — enter an ID manually",
+      aiPrompt: "System prompt ({target_language} inserts the answer language)",
+      aiResetPrompt: "Reset prompt",
+      aiQuestion: "Your question",
+      aiUseContext: "Include source text as context",
+      aiQuestionHint: "Ask about a word, meaning, usage, or anything else",
+      aiContextHint: "The current source text is sent as context only when you press Ask.",
+      aiSend: "Ask",
+      aiSending: "Asking...",
+      aiAnswer: "AI answer",
+      aiNotice: "Remote AI services may charge per request and receive the submitted text.",
+
       settings: "Settings",
       history: "History",
       model: "Model",
@@ -737,6 +780,31 @@
     },
     ru: {
       translate: "Перевести",
+      aiTitle: "Спросить ИИ",
+      aiEnabled: "Включить ИИ-помощника",
+      aiProvider: "Имя подключения",
+      aiBaseUrl: "Адрес API (Base URL)",
+      aiModel: "ID модели",
+      aiTimeout: "Таймаут (секунды)",
+      aiKey: "API-ключ (необязательно)",
+      aiSaveKey: "Сохранить ключ",
+      aiClearKey: "Удалить ключ",
+      aiFindModels: "Получить модели",
+      aiTestModel: "Проверить модель",
+      aiConnectionOk: "Модель успешно ответила.",
+      aiModelsFound: "Доступно моделей: {count}",
+      aiNoModels: "Список пуст — введите ID вручную",
+      aiPrompt: "Системный промпт ({target_language} — язык ответа)",
+      aiResetPrompt: "Сбросить промпт",
+      aiQuestion: "Ваш вопрос",
+      aiUseContext: "Использовать исходный текст как контекст",
+      aiQuestionHint: "Спросите о слове, значении, употреблении или о чём угодно",
+      aiContextHint: "Текущий исходный текст отправляется как контекст только после нажатия кнопки.",
+      aiSend: "Спросить",
+      aiSending: "Ожидание...",
+      aiAnswer: "Ответ ИИ",
+      aiNotice: "Облачные сервисы могут тарифицировать запросы и получать отправленный текст.",
+
       settings: "Настройки",
       history: "История",
       model: "Модель",
@@ -911,6 +979,31 @@
     },
     sk: {
       translate: "Preložiť",
+      aiTitle: "Opýtať sa AI",
+      aiEnabled: "Zapnúť AI asistenta",
+      aiProvider: "Názov pripojenia",
+      aiBaseUrl: "Adresa API (Base URL)",
+      aiModel: "ID modelu",
+      aiTimeout: "Časový limit (sekundy)",
+      aiKey: "API kľúč (nepovinné)",
+      aiSaveKey: "Uložiť kľúč",
+      aiClearKey: "Odstrániť kľúč",
+      aiFindModels: "Načítať modely",
+      aiTestModel: "Otestovať model",
+      aiConnectionOk: "Model úspešne odpovedal.",
+      aiModelsFound: "Dostupné modely: {count}",
+      aiNoModels: "Žiadne modely — zadajte ID ručne",
+      aiPrompt: "Systémový prompt ({target_language} určuje jazyk odpovede)",
+      aiResetPrompt: "Obnoviť prompt",
+      aiQuestion: "Vaša otázka",
+      aiUseContext: "Použiť zdrojový text ako kontext",
+      aiQuestionHint: "Opýtajte sa na slovo, význam, použitie alebo čokoľvek iné",
+      aiContextHint: "Aktuálny text sa odošle ako kontext až po kliknutí na tlačidlo.",
+      aiSend: "Opýtať sa",
+      aiSending: "Čakám...",
+      aiAnswer: "Odpoveď AI",
+      aiNotice: "Vzdialené AI služby môžu účtovať poplatky a dostanú odoslaný text.",
+
       settings: "Nastavenia",
       history: "História",
       model: "Model",
@@ -1429,14 +1522,16 @@
     const trimmed = value.trim();
     if (!trimmed) return;
     try {
+      if (provider === "ai-assistant") await persistConfig(false);
       await invoke("save_api_key", { provider, key: trimmed });
       if (provider === "deepl") deeplKey = "";
       if (provider === "google") googleKey = "";
       if (provider === "yandex") yandexKey = "";
       if (provider === "openai-compatible") localKey = "";
+      if (provider === "ai-assistant") aiKey = "";
       // Saving a network key without enabling the providers would leave it unused, so turn
       // the network providers on automatically — that is clearly what the user intended.
-      if (config && provider !== "openai-compatible" && !config.apiProviderEnabled) {
+      if (config && !["openai-compatible", "ai-assistant"].includes(provider) && !config.apiProviderEnabled) {
         config.apiProviderEnabled = true;
         await persistConfig(false);
       }
@@ -1450,16 +1545,78 @@
   async function clearKey(provider: SecretProvider) {
     error = "";
     try {
+      if (provider === "ai-assistant") await persistConfig(false);
       await invoke("clear_api_key", { provider });
       if (provider === "deepl") deeplKey = "";
       if (provider === "google") googleKey = "";
       if (provider === "yandex") yandexKey = "";
       if (provider === "openai-compatible") localKey = "";
+      if (provider === "ai-assistant") aiKey = "";
       await refresh();
       status = t("keyRemoved");
     } catch (err) {
       error = String(err);
     }
+  }
+
+  async function fetchAiModels() {
+    if (!config?.assistantEnabled || aiModelLoading) return;
+    aiModelLoading = true;
+    aiTestStatus = "";
+    try {
+      await persistConfig(false);
+      aiModels = await invoke<string[]>("assistant_models");
+      aiTestStatus = aiModels.length ? t("aiModelsFound").replace("{count}", String(aiModels.length)) : t("aiNoModels");
+    } catch (err) {
+      aiTestStatus = String(err);
+    } finally {
+      aiModelLoading = false;
+    }
+  }
+
+  async function testAiConnection() {
+    if (!config?.assistantEnabled || !config.assistantModel.trim() || aiModelLoading) return;
+    aiModelLoading = true;
+    aiTestStatus = "";
+    try {
+      await persistConfig(false);
+      await invoke<{ text: string }>("assistant_ask", {
+        request: {
+          question: "Reply with the single word OK.",
+          context: "",
+          targetLanguage: languageLabel(config.targetLang),
+        },
+      });
+      aiTestStatus = t("aiConnectionOk");
+    } catch (err) {
+      aiTestStatus = String(err);
+    } finally {
+      aiModelLoading = false;
+    }
+  }
+
+  async function askAi() {
+    if (!config?.assistantEnabled || aiLoading || !aiQuestion.trim()) return;
+    aiLoading = true;
+    aiError = "";
+    aiAnswer = "";
+    const currentRequest = ++aiRequestSequence;
+    const targetLanguage = languageLabel(config.targetLang);
+    try {
+      await persistConfig(false);
+      const response = await invoke<{ text: string }>("assistant_ask", {
+        request: { question: aiQuestion, context: aiUseContext ? sourceText : "", targetLanguage },
+      });
+      if (currentRequest === aiRequestSequence && config?.assistantEnabled) aiAnswer = response.text;
+    } catch (err) {
+      if (currentRequest === aiRequestSequence && config?.assistantEnabled) aiError = String(err);
+    } finally {
+      if (currentRequest === aiRequestSequence) aiLoading = false;
+    }
+  }
+
+  function resetAiPrompt() {
+    if (config) config.assistantSystemPrompt = "You help people learn foreign languages. Explain vocabulary, usage, nuances and examples clearly. Answer in {target_language} unless the user explicitly requests otherwise.";
   }
 
   async function unloadModels() {
@@ -2317,6 +2474,21 @@
             </div>
           </section>
 
+          {#if config.assistantEnabled}
+            <details class="dictionary-panel ai-panel">
+              <summary><strong>{t("aiTitle")}</strong> <span class="muted">{config.assistantName || config.assistantModel}</span></summary>
+              <label class="ai-question-label">
+                <span class="visually-hidden">{t("aiQuestion")}</span>
+                <textarea rows="2" bind:value={aiQuestion} placeholder={t("aiQuestionHint")}></textarea>
+              </label>
+              <label class="check ai-context"><input type="checkbox" bind:checked={aiUseContext} /><span>{t("aiUseContext")}</span></label>
+              <p class="muted">{t("aiContextHint")}</p>
+              <button type="button" class="primary" disabled={aiLoading || !aiQuestion.trim() || !config.assistantModel.trim()} on:click={askAi}>{aiLoading ? t("aiSending") : t("aiSend")}</button>
+              {#if aiError}<p role="alert" class="inline-note error-note">{aiError}</p>{/if}
+              {#if aiAnswer}<div class="ai-answer" aria-live="polite"><strong>{t("aiAnswer")}</strong><p>{aiAnswer}</p></div>{/if}
+            </details>
+          {/if}
+
           {#if config.dictionaryEnabled && singleWord}
             <section class="dictionary-panel" aria-label={t("wordDetails")}>
               <header class="dictionary-head">
@@ -2657,6 +2829,32 @@
             </details>
           </div>
 
+          <div class="settings-side">
+          <div class="group ai-settings">
+            <div class="group-head"><h2>{t("aiTitle")}</h2></div>
+            <label class="toggle-row"><input type="checkbox" bind:checked={config.assistantEnabled} on:change={() => { aiRequestSequence++; aiLoading = false; aiAnswer = ""; aiError = ""; }} /><span>{t("aiEnabled")}</span></label>
+            {#if config.assistantEnabled}
+              <label><span>{t("aiProvider")}</span><input bind:value={config.assistantName} maxlength="100" /></label>
+              <label><span>{t("aiBaseUrl")}</span><input type="url" bind:value={config.assistantBaseUrl} spellcheck="false" /></label>
+              <label><span>{t("aiModel")}</span><input bind:value={config.assistantModel} list="waylate-ai-models" spellcheck="false" /></label>
+              <datalist id="waylate-ai-models">{#each aiModels as id}<option value={id}></option>{/each}</datalist>
+              <label><span>{t("aiTimeout")}</span><input type="number" min="1" max="300" bind:value={config.assistantTimeoutSecs} /></label>
+              <div class="settings-actions">
+                <button type="button" on:click={fetchAiModels} disabled={aiModelLoading}>{t("aiFindModels")}</button>
+                <button type="button" on:click={testAiConnection} disabled={aiModelLoading || !config.assistantModel.trim()}>{t("aiTestModel")}</button>
+              </div>
+              {#if aiTestStatus}<p role="status" class="inline-note">{aiTestStatus}</p>{/if}
+              <label><span>{t("aiKey")}</span><input type="password" bind:value={aiKey} autocomplete="off" /></label>
+              {#if snapshot}<small class="field-hint">{keyStateHint(snapshot.hasAiKey)}</small>{/if}
+              <div class="settings-actions">
+                <button type="button" on:click={() => saveKey("ai-assistant", aiKey)} disabled={!aiKey.trim()}>{t("aiSaveKey")}</button>
+                <button type="button" on:click={() => clearKey("ai-assistant")}>{t("aiClearKey")}</button>
+              </div>
+              <label><span>{t("aiPrompt")}</span><textarea class="prompt-template" rows="4" bind:value={config.assistantSystemPrompt}></textarea></label>
+              <button type="button" on:click={resetAiPrompt}>{t("aiResetPrompt")}</button>
+              <p class="muted">{t("aiNotice")}</p>
+            {/if}
+          </div>
           <div class="group">
             <h2>{t("privacyApis")}</h2>
             <label>
@@ -2745,6 +2943,7 @@
                 <small class="field-hint">{keyStateHint(snapshot.hasLocalKey)}</small>
               {/if}
             </label>
+          </div>
           </div>
         </section>
       {:else if tab === "history"}
@@ -3075,7 +3274,7 @@
   .translate-view {
     min-height: 0;
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr) auto auto;
+    grid-template-rows: auto minmax(0, 1fr) auto auto auto;
     overflow: hidden;
   }
 
@@ -3701,6 +3900,8 @@
     text-overflow: ellipsis;
   }
 
+  .settings-side { min-width: 0; display: grid; align-content: start; gap: 12px; }
+
   .settings-grid {
     min-height: 0;
     padding: 0;
@@ -4076,4 +4277,57 @@
       min-height: 140px;
     }
   }
+  .ai-panel {
+    display: block;
+    max-height: min(38vh, 320px);
+    overflow: auto;
+  }
+  .ai-panel > summary {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    cursor: pointer;
+    align-items: center;
+    overflow-wrap: anywhere;
+  }
+  .ai-panel .ai-question-label {
+    display: block;
+    margin-top: 10px;
+  }
+  .ai-panel textarea {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 56px;
+    height: auto;
+    resize: vertical;
+  }
+  .ai-panel .muted {
+    font-size: 11px;
+    margin: 7px 0;
+  }
+  .ai-panel .ai-context {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .ai-panel .ai-context input {
+    width: auto;
+    min-width: auto;
+  }
+  .ai-panel .ai-answer {
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    font-size: 13px;
+  }
+  .ai-panel .ai-answer p { margin: 6px 0 0; }
+  .ai-settings { min-width: 0; }
+  .ai-settings input,
+  .ai-settings textarea { min-width: 0; max-width: 100%; box-sizing: border-box; }
+  .ai-settings .toggle-row { display: flex; align-items: center; gap: 8px; }
+  .ai-settings .toggle-row input { width: auto; }
 </style>
